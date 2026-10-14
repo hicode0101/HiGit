@@ -70,12 +70,14 @@ impl Git2Backend {
 
     /// 网络回调（详细日志版）：进度可路由到简单 progress 或 [`SyncEvent`]；
     /// 远端 sideband 输出按行上报为日志；凭证链与主机密钥校验同 [`build_callbacks`]。
+    /// `auth` 提供时把凭证链每一步的尝试 / 结果上报为同步日志。
     fn build_verbose_callbacks<'a>(
         &self,
         creds: Option<&Credentials>,
         url: &str,
         progress: Option<&'a dyn Fn(Progress)>,
         on_event: Option<&'a (dyn Fn(SyncEvent) + Send + Sync)>,
+        auth: Option<&'a AuthLog<'a>>,
         cancel: &CancelToken,
     ) -> git2::RemoteCallbacks<'a> {
         let mut cbs = git2::RemoteCallbacks::new();
@@ -134,6 +136,7 @@ impl Git2Backend {
                 key_path: String::new(),
                 passphrase: String::new(),
             }),
+            auth,
         );
         set_hostkey_callback(&mut cbs, url);
         cbs
@@ -185,9 +188,11 @@ impl Git2Backend {
             }
         };
         log("dim", format!("git fetch --progress \"{name}\""));
+        log("dim", format!("远端: {url}"));
 
         let before = Self::remote_ref_snapshot(repo, &name);
-        let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, cancel);
+        let auth = on_event.map(AuthLog::new);
+        let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
         let mut opts = git2::FetchOptions::new();
         opts.remote_callbacks(cbs);
         opts.prune(FetchPrune::On);
@@ -197,6 +202,9 @@ impl Git2Backend {
         // 空切片 = 使用 remote.<name>.fetch 已配置的 refspec
         r.fetch(&[] as &[&str], Some(&mut opts), None)
             .map_err(|e| map_net_err(e, &url, cancel.is_cancelled(), creds.is_some()))?;
+        if let Some(a) = auth.as_ref() {
+            a.succeed();
+        }
 
         let after = Self::remote_ref_snapshot(repo, &name);
         let mut updates = Vec::new();
@@ -270,7 +278,9 @@ impl Git2Backend {
             "dim",
             format!("git pull --progress \"{remote_name}\" {remote_branch}"),
         );
-        let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, cancel);
+        log("dim", format!("远端: {url}"));
+        let auth = on_event.map(AuthLog::new);
+        let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
         let mut opts = git2::FetchOptions::new();
         opts.remote_callbacks(cbs);
         if let Some(px) = self.proxy_opts() {
@@ -280,6 +290,9 @@ impl Git2Backend {
             format!("+refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
         r.fetch(std::slice::from_ref(&spec), Some(&mut opts), None)
             .map_err(|e| map_net_err(e, &url, cancel.is_cancelled(), creds.is_some()))?;
+        if let Some(a) = auth.as_ref() {
+            a.succeed();
+        }
 
         let local_oid = local
             .get()
@@ -696,6 +709,7 @@ impl GitEngine for Git2Backend {
                 .find_remote(&remote_name)
                 .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?;
             let url = r.url().unwrap_or_default().to_string();
+            let auth = AuthLog::new(on_event);
 
             if cancel.is_cancelled() {
                 return Err(HigitError::cancelled());
@@ -720,6 +734,7 @@ impl GitEngine for Git2Backend {
                 "dim",
                 format!("git push{force_flag} --progress \"{remote_name}\" {display}"),
             );
+            log("dim", format!("远端: {url}"));
 
             let mut cbs = git2::RemoteCallbacks::new();
             // 远端 sideband 输出（remote: ...）按行缓冲上报；返回 false 以支持中止
@@ -778,6 +793,7 @@ impl GitEngine for Git2Backend {
                     key_path: String::new(),
                     passphrase: String::new(),
                 }),
+                Some(&auth),
             );
             set_hostkey_callback(&mut cbs, &url);
 
@@ -789,6 +805,7 @@ impl GitEngine for Git2Backend {
 
             r.push(&refspecs, Some(&mut opts))
                 .map_err(|e| map_net_err(e, &url, cancel.is_cancelled(), creds.is_some()))?;
+            auth.succeed();
 
             // 逐分支建立缺失的上游（等价 -u；推送多分支时目标为各自的远端分支名）
             let mut created_upstream = false;
@@ -2067,6 +2084,7 @@ fn build_callbacks<'a>(
             key_path: String::new(),
             passphrase: String::new(),
         }),
+        None,
     );
     set_hostkey_callback(&mut cbs, url);
     cbs
@@ -2118,8 +2136,7 @@ fn set_hostkey_callback(cbs: &mut git2::RemoteCallbacks<'_>, url: &str) {
 }
 
 /// 是否存在可用的 SSH agent（Windows：OpenSSH agent 命名管道或 Pageant；Unix：SSH_AUTH_SOCK）。
-/// libgit2 对“密钥无法解析”类的认证失败不会重新询问凭证回调（直接终止，实测如此），
-/// 链路第一步必须是成功概率最高的凭证，因此需要先探测 agent。
+/// 探测结果只用于决定链路中是否包含 Agent 步骤。
 #[cfg(windows)]
 fn ssh_agent_available() -> bool {
     // Windows OpenSSH agent 命名管道
@@ -2140,18 +2157,106 @@ fn ssh_agent_available() -> bool {
     std::env::var_os("SSH_AUTH_SOCK").is_some_and(|s| !s.is_empty())
 }
 
-/// 凭证回调：HTTPS 走用户名/密码；SSH 按链路逐次尝试 ssh-agent（可用时优先）→
-/// 指定密钥 → ~/.ssh 默认密钥。
-/// libgit2 每次认证失败都会重新调用回调，用计数器步进链路；链路耗尽立即返回 Auth 错误，
-/// 避免对同一无效凭证反复重试（实测可空转 200+ 次），同时保持 AuthFailed 分类驱动凭证对话框。
-fn apply_credentials(cbs: &mut git2::RemoteCallbacks<'_>, creds: Credentials) {
-    #[derive(Clone, Copy)]
-    enum SshStep {
-        Configured,
-        Agent,
-        Default,
+/// SSH 认证链步骤。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SshStep {
+    /// 仓库设置 / 凭证对话框显式配置的密钥
+    Configured,
+    /// ssh-agent（Windows：OpenSSH agent / Pageant；Unix：SSH_AUTH_SOCK）
+    Agent,
+    /// ~/.ssh 默认密钥（id_ed25519 / id_ecdsa / id_rsa）
+    Default,
+}
+
+/// SSH 认证链路：显式配置的密钥优先于 ssh-agent，最后回退 ~/.ssh 默认密钥。
+/// 配置的密钥若是当前加密后端无法解析的格式（见 [`ssh_key_backend_supported`]），不进入
+/// 链路——libgit2 对解析失败会直接终止会话且不再回调凭证链，链路将无法回退 agent。
+fn ssh_steps(configured: bool, agent_available: bool) -> &'static [SshStep] {
+    match (configured, agent_available) {
+        (true, true) => &[SshStep::Configured, SshStep::Agent, SshStep::Default],
+        (true, false) => &[SshStep::Configured, SshStep::Default],
+        (false, true) => &[SshStep::Agent, SshStep::Default],
+        (false, false) => &[SshStep::Default],
+    }
+}
+
+/// 显式配置的 SSH 密钥能否被当前 libgit2 加密后端解析。
+///
+/// libgit2 的 libssh2 在 Windows 默认 WinCNG 后端：只能解析 PEM（PKCS#1）RSA / DSA
+/// 私钥，无法处理 OpenSSH 容器（ed25519 等新格式）与 PKCS#8。这类密钥交给 libgit2 后，
+/// 解析失败会直接终止会话且不再回调凭证链（见 [`apply_credentials`] 注释），链路无法
+/// 回退 agent——因此按文件头嗅探格式，不支持的直接跳过 Configured 步（同步对话框会
+/// 提示降级到 ssh-agent）。
+///
+/// 文件不存在 / 不可读时返回 true：凭证构造会失败并正常进入链路下一步。
+pub fn ssh_key_backend_supported(key_path: &str) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 64];
+    let n = std::fs::File::open(key_path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    if n == 0 {
+        return true;
+    }
+    let head = String::from_utf8_lossy(&buf[..n]);
+    !head.contains("BEGIN OPENSSH PRIVATE KEY") // OpenSSH 容器（ed25519 等）
+        && !head.contains("BEGIN PRIVATE KEY") // PKCS#8
+        && !head.contains("BEGIN ENCRYPTED PRIVATE KEY")
+        && !head.contains("BEGIN EC PRIVATE KEY")
+}
+
+/// 凭证链步骤日志（同步对话框详细日志）：每一步验证的尝试 / 结果实时上报到 `on_event`；
+/// `last` 记录最近一次交给远端的凭证描述，供"被远端拒绝"与"认证通过"事件使用。
+struct AuthLog<'a> {
+    emit: &'a (dyn Fn(SyncEvent) + Send + Sync),
+    last: std::sync::Mutex<Option<String>>,
+}
+
+impl<'a> AuthLog<'a> {
+    fn new(emit: &'a (dyn Fn(SyncEvent) + Send + Sync)) -> Self {
+        Self {
+            emit,
+            last: std::sync::Mutex::new(None),
+        }
     }
 
+    fn log(&self, level: &str, text: String) {
+        (self.emit)(SyncEvent::Log {
+            level: level.to_string(),
+            text,
+        });
+    }
+
+    /// 报告一次凭证尝试并记录其描述（用于后续"被远端拒绝" / "认证通过"）。
+    fn attempt(&self, desc: String) {
+        self.log("dim", format!("认证: 尝试 {desc}"));
+        *self.last.lock().expect("auth log mutex poisoned") = Some(desc);
+    }
+
+    /// 上一次交给远端的凭证被远端拒绝（凭证回调被再次调用）。
+    fn reject_last(&self) {
+        if let Some(d) = self.last.lock().expect("auth log mutex poisoned").take() {
+            self.log("warn", format!("认证: {d} 被远端拒绝"));
+        }
+    }
+
+    /// 网络操作成功：最后一次尝试的方式即通过方式。
+    fn succeed(&self) {
+        if let Some(d) = self.last.lock().expect("auth log mutex poisoned").take() {
+            self.log("ok", format!("认证通过: {d}"));
+        }
+    }
+}
+
+/// 凭证回调：HTTPS 走用户名/密码；SSH 按链路逐次尝试 指定密钥（格式受支持时优先）→
+/// ssh-agent → ~/.ssh 默认密钥。每一步的尝试 / 拒绝 / 跳过经 `auth` 实时上报（详细日志模式）。
+/// libgit2 每次认证失败都会重新调用回调，用计数器步进链路；链路耗尽立即返回 Auth 错误，
+/// 避免对同一无效凭证反复重试（实测可空转 200+ 次），同时保持 AuthFailed 分类驱动凭证对话框。
+fn apply_credentials<'a>(
+    cbs: &mut git2::RemoteCallbacks<'a>,
+    creds: Credentials,
+    auth: Option<&'a AuthLog<'a>>,
+) {
     let (userpass, ssh) = match &creds {
         Credentials::UserPass { username, password } => {
             (Some((username.clone(), password.clone())), None)
@@ -2161,25 +2266,24 @@ fn apply_credentials(cbs: &mut git2::RemoteCallbacks<'_>, creds: Credentials) {
             key_path,
             passphrase,
         } => {
-            let agent_first = ssh_agent_available();
-            let steps: &[SshStep] = if key_path.is_empty() {
-                if agent_first {
-                    &[SshStep::Agent, SshStep::Default]
-                } else {
-                    &[SshStep::Default]
+            let agent_available = ssh_agent_available();
+            let configured = !key_path.is_empty() && ssh_key_backend_supported(key_path);
+            // 配置了密钥但引擎后端无法解析：显式提示降级（同步对话框日志）
+            if let Some(a) = auth {
+                if !key_path.is_empty() && !configured {
+                    a.log(
+                        "warn",
+                        format!("认证: 跳过 配置的密钥 {key_path}（格式不受当前引擎支持）"),
+                    );
                 }
-            } else if agent_first {
-                &[SshStep::Agent, SshStep::Configured, SshStep::Default]
-            } else {
-                &[SshStep::Configured, SshStep::Default]
-            };
+            }
             (
                 None,
                 Some((
                     username.clone(),
                     key_path.clone(),
                     passphrase.clone(),
-                    steps,
+                    ssh_steps(configured, agent_available),
                 )),
             )
         }
@@ -2204,8 +2308,15 @@ fn apply_credentials(cbs: &mut git2::RemoteCallbacks<'_>, creds: Credentials) {
                 .unwrap_or("git");
             return Cred::username(name);
         }
+        // 走到这里是一次真实凭证请求：若此前已交出过凭证，说明它被远端拒绝
+        if let Some(a) = auth {
+            a.reject_last();
+        }
         if let Some((u, p)) = &userpass {
             if allowed.contains(CredentialType::USER_PASS_PLAINTEXT) {
+                if let Some(a) = auth {
+                    a.attempt(format!("HTTPS 用户名 / 密码（用户 {u}）"));
+                }
                 return Cred::userpass_plaintext(u, p);
             }
         }
@@ -2227,31 +2338,71 @@ fn apply_credentials(cbs: &mut git2::RemoteCallbacks<'_>, creds: Credentials) {
             .to_string();
         let pass = (!passphrase.is_empty()).then_some(passphrase.as_str());
         for (idx, step) in steps.iter().enumerate().skip(next.get()) {
-            let cred = match step {
-                SshStep::Configured => {
-                    Cred::ssh_key(&name, None, Path::new(key_path), pass).map_err(|_| ())
-                }
-                SshStep::Agent => Cred::ssh_key_from_agent(&name).map_err(|_| ()),
+            let cred: Option<(Cred, String)> = match step {
+                SshStep::Configured => match Cred::ssh_key(&name, None, Path::new(key_path), pass)
+                {
+                    Ok(c) => Some((c, format!("配置的密钥 {key_path}"))),
+                    Err(_) => {
+                        if let Some(a) = auth {
+                            a.log("dim", format!("认证: 跳过 配置的密钥 {key_path}（不可用）"));
+                        }
+                        None
+                    }
+                },
+                SshStep::Agent => match Cred::ssh_key_from_agent(&name) {
+                    Ok(c) => Some((c, "ssh-agent".to_string())),
+                    Err(_) => {
+                        if let Some(a) = auth {
+                            a.log("dim", "认证: 跳过 ssh-agent（无可用凭证）".into());
+                        }
+                        None
+                    }
+                },
                 SshStep::Default => {
-                    let Some(home) = home_dir() else { continue };
-                    ["id_ed25519", "id_ecdsa", "id_rsa"]
-                        .iter()
-                        .find_map(|f| {
+                    if let Some(home) = home_dir() {
+                        let mut found: Option<(Cred, String)> = None;
+                        for f in ["id_ed25519", "id_ecdsa", "id_rsa"] {
                             let p = home.join(".ssh").join(f);
-                            p.exists()
-                                .then(|| Cred::ssh_key(&name, None, &p, None).ok())
-                                .flatten()
-                        })
-                        .ok_or(())
+                            if !p.exists() {
+                                continue;
+                            }
+                            let desc = format!("默认密钥 ~/.ssh/{f}");
+                            match Cred::ssh_key(&name, None, &p, None) {
+                                Ok(c) => {
+                                    found = Some((c, desc));
+                                    break;
+                                }
+                                Err(_) => {
+                                    if let Some(a) = auth {
+                                        a.log("dim", format!("认证: 跳过 {desc}（不可用）"));
+                                    }
+                                }
+                            }
+                        }
+                        if found.is_none() {
+                            if let Some(a) = auth {
+                                a.log("dim", "认证: ~/.ssh 无可用默认密钥".into());
+                            }
+                        }
+                        found
+                    } else {
+                        if let Some(a) = auth {
+                            a.log("dim", "认证: 跳过 默认密钥（无法定位用户主目录）".into());
+                        }
+                        None
+                    }
                 }
             };
-            match cred {
-                Ok(c) => {
-                    next.set(idx + 1);
-                    return Ok(c);
+            if let Some((c, desc)) = cred {
+                if let Some(a) = auth {
+                    a.attempt(desc);
                 }
-                Err(_) => continue, // 构造失败（密钥缺失等）：直接试链路下一步
+                next.set(idx + 1);
+                return Ok(c);
             }
+        }
+        if let Some(a) = auth {
+            a.log("error", "认证: 所有验证方式均被远端拒绝".into());
         }
         // 链路耗尽：立即按认证失败结束（驱动 keyring 重试 / 凭证对话框）
         Err(git2::Error::new(
@@ -2483,5 +2634,90 @@ mod tests {
             let err = map_net_err(e, "git@github.com:user/repo.git", false, true);
             assert_eq!(err.code, ErrorCode::PushRejected, "{msg}");
         }
+    }
+
+    #[test]
+    fn ssh_steps_configured_key_before_agent() {
+        // 显式配置的密钥优先于 ssh-agent；agent 可用性只决定是否包含 Agent 步
+        use SshStep::*;
+        assert_eq!(ssh_steps(true, true), &[Configured, Agent, Default]);
+        assert_eq!(ssh_steps(true, false), &[Configured, Default]);
+        // 密钥格式不受支持（configured=false）：从 agent 开始，无 agent 时只试默认密钥
+        assert_eq!(ssh_steps(false, true), &[Agent, Default]);
+        assert_eq!(ssh_steps(false, false), &[Default]);
+    }
+
+    #[test]
+    fn ssh_key_backend_supported_by_header() {
+        let dir = std::env::temp_dir().join(format!("higit-keyfmt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let write = |name: &str, head: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, head).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        // WinCNG 无法解析的格式：OpenSSH 容器 / PKCS#8 / EC → 不进链路
+        assert!(!ssh_key_backend_supported(&write(
+            "openssh.key",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc"
+        )));
+        assert!(!ssh_key_backend_supported(&write(
+            "pkcs8.key",
+            "-----BEGIN PRIVATE KEY-----\nabc"
+        )));
+        assert!(!ssh_key_backend_supported(&write(
+            "ec.key",
+            "-----BEGIN EC PRIVATE KEY-----\nabc"
+        )));
+        // PEM RSA / DSA：可用
+        assert!(ssh_key_backend_supported(&write(
+            "rsa.key",
+            "-----BEGIN RSA PRIVATE KEY-----\nabc"
+        )));
+        // 文件不存在：交给凭证构造阶段正常失败并走链路下一步
+        assert!(ssh_key_backend_supported("Z:/definitely/missing.key"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auth_log_reports_attempt_reject_and_succeed() {
+        let events: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        {
+            let sink = events.clone();
+            let on_event = move |e: SyncEvent| {
+                if let SyncEvent::Log { level, text } = e {
+                    sink.lock().unwrap().push((level, text));
+                }
+            };
+            let auth = AuthLog::new(&on_event);
+            // 第一轮：配置的密钥被远端拒绝，链路步进到 ssh-agent
+            auth.attempt("配置的密钥 D:/keys/id".into());
+            auth.reject_last();
+            // 第二轮：agent 也被拒绝，链路耗尽
+            auth.attempt("ssh-agent".into());
+            auth.reject_last();
+            auth.log("error", "认证: 所有验证方式均被远端拒绝".into());
+            // 新一轮（keyring 重试）：agent 通过
+            auth.attempt("ssh-agent".into());
+            auth.succeed();
+            // succeed 后不再有未上报的"被拒绝"
+            auth.reject_last();
+        }
+        let ev = events.lock().unwrap();
+        let texts: Vec<&str> = ev.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "认证: 尝试 配置的密钥 D:/keys/id",
+                "认证: 配置的密钥 D:/keys/id 被远端拒绝",
+                "认证: 尝试 ssh-agent",
+                "认证: ssh-agent 被远端拒绝",
+                "认证: 所有验证方式均被远端拒绝",
+                "认证: 尝试 ssh-agent",
+                "认证通过: ssh-agent",
+            ]
+        );
+        let levels: Vec<&str> = ev.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(levels, ["dim", "warn", "dim", "warn", "error", "dim", "ok"]);
     }
 }

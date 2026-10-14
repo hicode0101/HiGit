@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** 仓库设置对话框（FR-1.7 / FR-5.5 / FR-10.3）：别名 / 远端 URL / 认证 / Git 身份 */
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { store, showError, toast, refreshRepos, refreshIdentity } from "../store";
 import { api } from "../api";
 import type { RepoEntryDto } from "../api/types";
 import { t } from "../i18n";
 import DialogBase from "./DialogBase.vue";
+import PasswordInput from "./PasswordInput.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -13,7 +14,8 @@ const emit = defineEmits<{ close: [] }>();
 const entry = ref<RepoEntryDto | null>(null);
 
 const tab = ref<0 | 1 | 2>(0);
-const tabs = [t("Repo Info"), t("Auth"), t("Git Identity")];
+// computed 包裹：页签文案跟随语言切换实时刷新
+const tabs = computed(() => [t("Repo Info"), t("Auth"), t("Git Identity")]);
 
 const alias = ref("");
 const url = ref("");
@@ -23,6 +25,8 @@ const username = ref("");
 const password = ref("");
 const keyPath = ref("");
 const rememberCred = ref(true);
+/** 系统凭证管理器中是否已存有该仓库的 HTTPS 凭证（回显提示，密码本身不回显） */
+const credSaved = ref(false);
 // Git 身份页（与克隆对话框一致）：姓名 / 邮箱双列，两栏留空跟随全局
 const idName = ref("");
 const idEmail = ref("");
@@ -44,28 +48,13 @@ async function load() {
     keyPath.value = e.auth?.keyPath ?? "";
     idName.value = e.identity?.name ?? "";
     idEmail.value = e.identity?.email ?? "";
+    // 已保存凭证徽章（密码属机密不回显，仅提示存在与否）
+    credSaved.value = await api.repoCredentialSaved(repoId).catch(() => false);
   } catch (err) {
     showError(err as Error);
   }
 }
 void load();
-
-/** 从仓库远端 URL 提取 host（与后端 host_from_url 同规则），用于凭证入库 */
-function hostFromUrl(u: string): string {
-  const s = u.trim();
-  if (s.startsWith("git@")) {
-    const host = s.slice(4).split(":")[0];
-    if (host) return host;
-  }
-  const idx = s.indexOf("://");
-  if (idx >= 0) {
-    let authority = s.slice(idx + 3).split("/")[0] ?? "";
-    authority = authority.split("@").pop() ?? authority;
-    const host = authority.split(":")[0] ?? "";
-    if (host) return host;
-  }
-  return "";
-}
 
 async function chooseKey() {
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -97,16 +86,11 @@ async function save() {
         !idName.value.trim() && !idEmail.value.trim()
           ? null
           : { name: idName.value, email: idEmail.value },
+      // HTTPS 凭证随设置一并提交，由后端写入系统凭证管理器（host 解析含 git 配置回退）；
+      // 留空 = 保持已存凭证不变；保存失败会在此抛错提示，不再静默
+      password: authKind.value === "http" ? password.value : undefined,
+      rememberCred: rememberCred.value,
     });
-    // HTTPS 勾选"记住"且填了密码：写入系统凭证管理器（host 取自远端 URL）
-    if (authKind.value === "http" && rememberCred.value && password.value && url.value.trim()) {
-      const host = hostFromUrl(url.value);
-      if (host) {
-        await api
-          .saveCredential(host, { kind: "http", username: username.value.trim(), password: password.value })
-          .catch(() => undefined);
-      }
-    }
     toast(t("Saved"));
     await Promise.all([refreshRepos(), refreshIdentity()]);
     emit("close");
@@ -150,7 +134,10 @@ async function save() {
         </div>
         <div class="form-row">
           <label>{{ t("Password / Token") }}</label>
-          <input v-model="password" type="password" />
+          <PasswordInput v-model="password" placeholder="ghp_…" />
+          <span v-if="credSaved" class="hint">
+            ✓ {{ t("Saved in system credential manager. Leave empty to keep it.") }}
+          </span>
         </div>
         <label class="check">
           <input v-model="rememberCred" type="checkbox" />

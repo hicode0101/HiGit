@@ -6,6 +6,7 @@ import { api } from "../api";
 import { t } from "../i18n";
 import { registerCloneCreds, registerCloneSuccess } from "../tasks";
 import DialogBase from "./DialogBase.vue";
+import PasswordInput from "./PasswordInput.vue";
 import { joinNative } from "../path";
 
 const emit = defineEmits<{ close: [] }>();
@@ -208,7 +209,7 @@ registerCloneSuccess(async (path) => {
         </div>
         <div class="form-row">
           <label>{{ t("Password / Token") }}</label>
-          <input v-model="password" type="password" />
+          <PasswordInput v-model="password" />
         </div>
         <div class="form-row">
           <label class="check-line">

@@ -185,12 +185,13 @@ pub struct BootstrapDto {
 pub async fn get_state(app: AppHandle) -> CmdResult<BootstrapDto> {
     let (config, corrupted) = crate::state::load_config();
     let proxy = config.proxy.clone();
+    let proxy_on = config.proxy_enabled && !config.proxy.trim().is_empty();
     let engine = app.state::<AppState>().engine.clone();
     run_blocking(move || {
-        engine.set_proxy(if proxy.trim().is_empty() {
-            None
-        } else {
+        engine.set_proxy(if proxy_on {
             Some(proxy.as_str())
+        } else {
+            None
         });
         let sys_lang = sys_locale::get_locale().unwrap_or_else(|| "en".to_string());
         Ok(BootstrapDto {
@@ -236,6 +237,7 @@ pub fn to_config_dto(cfg: &higit_core::config::AppConfig) -> ConfigDto {
         auto_refresh: cfg.auto_refresh,
         show_ignored: cfg.show_ignored,
         git_backend: cfg.git_backend.clone(),
+        proxy_enabled: cfg.proxy_enabled,
         proxy: cfg.proxy.clone(),
     }
 }
@@ -271,6 +273,7 @@ pub fn config_from_dto(dto: &ConfigDto) -> higit_core::config::AppConfig {
         auto_refresh: dto.auto_refresh,
         show_ignored: dto.show_ignored,
         git_backend: dto.git_backend.clone(),
+        proxy_enabled: dto.proxy_enabled,
         proxy: dto.proxy.clone(),
     }
 }
@@ -287,10 +290,10 @@ pub async fn save_config(app: AppHandle, config: ConfigDto) -> CmdResult<()> {
             cfg.recent_repos = cur.recent_repos.clone();
             cfg.last_repo = cur.last_repo.clone();
         }
-        state.engine.set_proxy(if cfg.proxy.trim().is_empty() {
-            None
-        } else {
+        state.engine.set_proxy(if cfg.proxy_enabled && !cfg.proxy.trim().is_empty() {
             Some(cfg.proxy.as_str())
+        } else {
+            None
         });
         *state.config.lock().unwrap() = cfg;
         state.save_config();
@@ -540,6 +543,13 @@ pub struct RepoSettingsReq {
     pub url: String,
     #[serde(default)]
     pub identity: Option<IdentityDto>,
+    /// HTTPS 密码 / Token（机密，不落 config.json）：Some(非空) 时写入系统凭证管理器
+    #[serde(default)]
+    pub password: Option<String>,
+    /// 是否记住凭证到系统凭证管理器；None = true。
+    /// false 且密码留空时清除已存凭证
+    #[serde(default)]
+    pub remember_cred: Option<bool>,
 }
 
 /// 读取单个仓库条目（仓库设置对话框数据源）：按 id 实时取自后端 config，
@@ -606,6 +616,38 @@ pub async fn save_repo_settings(app: AppHandle, req: RepoSettingsReq) -> CmdResu
                 });
         }
         state.save_config();
+
+        // HTTPS 凭证入库（机密只进系统凭证管理器，不落 config.json）。
+        // host 优先取仓库设置的远端 URL，留空时回退仓库 git 配置的 origin——
+        // 与同步时的凭证预取同一解析规则（此前前端只认 URL 覆盖字段，留空即漏存）。
+        if let Some(auth) = &req.auth {
+            if auth.kind == "http" {
+                let remember = req.remember_cred.unwrap_or(true);
+                let password = req.password.as_deref().unwrap_or("");
+                let host = repo_https_url(&state, &p, &req.url).and_then(|u| https_host(&u));
+                if let Some(host) = host {
+                    match (remember, password.is_empty()) {
+                        (true, false) => cred_store::store(
+                            &higit_core::credentials::StoredCredential {
+                                kind: "http".into(),
+                                username: auth.username.clone(),
+                                secret: password.to_string(),
+                                key_path: String::new(),
+                            },
+                            &host,
+                        )
+                        .map_err(|e| {
+                            CommandError::msg("unknown", format!("save credential: {e}"))
+                        })?,
+                        // 取消"记住"且未输入新密码：视为清除已存凭证
+                        (false, true) => {
+                            let _ = cred_store::forget(&host, &auth.username);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         Ok(())
     })
     .await
@@ -1173,6 +1215,80 @@ fn progress_cb(app: AppHandle, job_id: u32) -> impl Fn(Progress) + Send + Sync +
     }
 }
 
+/// 从 http(s) URL 提取主机名（宽松解析：去 scheme / userinfo / 端口）。
+fn https_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?']).next()?;
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = authority.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// 仓库生效的远端 URL：仓库设置的 URL 覆盖 → 仓库 git 配置的 origin。
+/// 仅 http(s) URL 有效（SSH 远端的凭证走 ssh_creds_from_entry），否则 None。
+fn repo_https_url(state: &AppState, repo: &Path, url_override: &str) -> Option<String> {
+    let url = if url_override.trim().is_empty() {
+        let session = state.engine.open(repo).ok()?;
+        state.engine.remote_url(&session, "origin").ok()?? 
+    } else {
+        url_override.trim().to_string()
+    };
+    (url.starts_with("http://") || url.starts_with("https://")).then_some(url)
+}
+
+/// 仓库设置"记住"的 HTTPS 凭证（keyring 预取）：命中后首次同步即携带，
+/// 不必先发一次无凭证请求、等 401 后再走 keyring 重试。
+fn http_creds_from_store(state: &AppState, repo: &Path) -> Option<Credentials> {
+    let (username_hint, url_override) = {
+        let cfg = state.config.lock().unwrap();
+        let e = cfg.recent_repos.iter().find(|e| e.path == repo)?;
+        (
+            e.auth
+                .as_ref()
+                .filter(|a| a.kind == "http")
+                .map(|a| a.username.clone())
+                .unwrap_or_default(),
+            e.url.clone(),
+        )
+    };
+    let url = repo_https_url(state, repo, &url_override)?;
+    let host = https_host(&url)?;
+    let stored = cred_store::load(&host, &username_hint)?;
+    (stored.kind == "http").then(|| stored_to_creds(&stored, &host, &username_hint))
+}
+
+/// 仓库是否已在系统凭证管理器保存 HTTPS 凭证（设置对话框回显"已保存"提示用）。
+#[tauri::command]
+pub async fn repo_credential_saved(app: AppHandle, id: String) -> CmdResult<bool> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let (repo_path, username, url_override) = {
+            let cfg = state.config.lock().unwrap();
+            let e = cfg
+                .recent_repos
+                .iter()
+                .find(|e| e.id == id)
+                .ok_or_else(|| CommandError::msg("unknown", "repository not in list"))?;
+            (
+                e.path.clone(),
+                e.auth
+                    .as_ref()
+                    .map(|a| a.username.clone())
+                    .unwrap_or_default(),
+                e.url.clone(),
+            )
+        };
+        let Some(url) = repo_https_url(&state, &repo_path, &url_override) else {
+            return Ok(false);
+        };
+        let Some(host) = https_host(&url) else {
+            return Ok(false);
+        };
+        Ok(cred_store::load(&host, &username).is_some())
+    })
+    .await
+}
+
 /// 仓库设置中的 SSH 凭证（仅 SSH；HTTP 口令属机密不落盘，始终走 keyring / 凭证对话框）。
 fn ssh_creds_from_entry(state: &AppState, repo: &Path) -> Option<Credentials> {
     let cfg = state.config.lock().unwrap();
@@ -1303,7 +1419,8 @@ fn sync_once(
     apply_url_override(&state, &h.path, &h.session);
     let used = explicit
         .cloned()
-        .or_else(|| ssh_creds_from_entry(&state, &h.path));
+        .or_else(|| ssh_creds_from_entry(&state, &h.path))
+        .or_else(|| http_creds_from_store(&state, &h.path));
     drop(guard);
 
     let run =
@@ -1566,10 +1683,11 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
             }
         }
 
-        // 生效凭证链：对话框凭证 → 仓库设置 SSH → keyring（失败时重试一次）
+        // 生效凭证链：对话框凭证 → 仓库设置 SSH → keyring 预取（失败时重试一次）
         let used = explicit
             .clone()
-            .or_else(|| ssh_creds_from_entry(&state, &repo_path));
+            .or_else(|| ssh_creds_from_entry(&state, &repo_path))
+            .or_else(|| http_creds_from_store(&state, &repo_path));
         emit_log(
             "info",
             match &used {
@@ -2324,7 +2442,7 @@ pub async fn export_diagnostics(app: AppHandle) -> CmdResult<String> {
                 cfg.theme,
                 cfg.auto_refresh,
                 cfg.show_ignored,
-                !cfg.proxy.is_empty(),
+                cfg.proxy_enabled && !cfg.proxy.trim().is_empty(),
                 cfg.recent_repos.len(),
                 cfg.recent_repos
                     .iter()

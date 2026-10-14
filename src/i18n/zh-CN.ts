@@ -161,6 +161,10 @@ export const zhCN: Record<string, string> = {
   Passphrase: "密钥口令",
   "Empty = try ssh-agent and default keys": "留空则依次尝试 ssh-agent 与默认密钥",
   "Remember credentials in system credential manager": "记住凭证（保存到系统凭证管理器）",
+  "Saved in system credential manager. Leave empty to keep it.":
+    "已保存到系统凭证管理器；留空则保持已存凭证不变",
+  "Show password": "显示明文",
+  "Hide password": "隐藏明文",
   "Sign in": "登录",
   "Username and password are required": "请填写用户名和密码",
   Language: "语言",
@@ -229,8 +233,10 @@ export const zhCN: Record<string, string> = {
   Untracked: "未跟踪",
   "Network": "网络",
   "Proxy URL": "代理地址",
-  "Applied to clone / fetch / push / pull. Leave empty for direct connection.":
-    "作用于克隆 / 抓取 / 推送 / 拉取；留空为直连",
+  "Enable proxy": "启用代理",
+  "Applied to clone / fetch / push / pull when enabled.": "开启后作用于克隆 / 抓取 / 推送 / 拉取",
+  "Name and email are required": "Git 身份的姓名和邮箱为必填项",
+  "Invalid email format": "邮箱格式不正确",
   "Show in Explorer": "在资源管理器中显示",
   Fetched: "已抓取",
   "Repository Settings": "仓库设置",

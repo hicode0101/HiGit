@@ -203,6 +203,8 @@ pub struct ConfigDto {
     pub auto_refresh: bool,
     pub show_ignored: bool,
     pub git_backend: String,
+    #[serde(default)]
+    pub proxy_enabled: bool,
     pub proxy: String,
 }
 

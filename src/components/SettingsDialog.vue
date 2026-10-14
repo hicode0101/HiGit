@@ -8,6 +8,11 @@ import DialogBase from "./DialogBase.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
+/** 开启代理时的默认地址 */
+const DEFAULT_PROXY = "socks5://127.0.0.1:1080";
+/** 邮箱格式：非空白@非空白.非空白（宽松校验，避免误拒合法地址） */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const globalIdentity = ref<{ name: string; email: string }>({ name: "", email: "" });
 
 onMounted(async () => {
@@ -19,10 +24,28 @@ onMounted(async () => {
   }
 });
 
+/** 打开代理开关时，地址为空则预填默认地址 */
+function onProxyToggle() {
+  if (store.config!.proxyEnabled && !store.config!.proxy.trim()) {
+    store.config!.proxy = DEFAULT_PROXY;
+  }
+}
+
 async function save() {
+  const name = globalIdentity.value.name.trim();
+  const email = globalIdentity.value.email.trim();
+  if (!name || !email) {
+    store.ui.error = { message: t("Name and email are required"), raw: "" };
+    return;
+  }
+  if (!EMAIL_RE.test(email)) {
+    store.ui.error = { message: t("Invalid email format"), raw: "" };
+    return;
+  }
   try {
-    if (globalIdentity.value.name.trim() && globalIdentity.value.email.trim()) {
-      await api.setIdentity("global", { name: globalIdentity.value.name, email: globalIdentity.value.email });
+    await api.setIdentity("global", { name, email });
+    if (store.config!.proxyEnabled && !store.config!.proxy.trim()) {
+      store.config!.proxy = DEFAULT_PROXY;
     }
     await persistConfig();
     toast(t("Saved"));
@@ -65,10 +88,18 @@ async function save() {
       </div>
 
       <div class="sec-title">{{ t("Network") }}</div>
+      <label class="check">
+        <input v-model="store.config!.proxyEnabled" type="checkbox" @change="onProxyToggle" />
+        {{ t("Enable proxy") }}
+      </label>
       <div class="form-row">
         <label>{{ t("Proxy URL") }}</label>
-        <input v-model="store.config!.proxy" placeholder="socks5://127.0.0.1:10808" />
-        <span class="hint">{{ t("Applied to clone / fetch / push / pull. Leave empty for direct connection.") }}</span>
+        <input
+          v-model="store.config!.proxy"
+          :disabled="!store.config!.proxyEnabled"
+          placeholder="socks5://127.0.0.1:1080"
+        />
+        <span class="hint">{{ t("Applied to clone / fetch / push / pull when enabled.") }}</span>
       </div>
     </div>
 
@@ -122,6 +153,11 @@ async function save() {
 .form-row label {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.form-row input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .hint {

@@ -9,6 +9,7 @@ import type { JobDoneEvent, SyncLogEvent, SyncPreviewDto, RepoEntryDto } from ".
 import { t } from "../i18n";
 import { registerSyncDone, startSyncJob, type SyncCreds, type SyncJobReq } from "../tasks";
 import DialogBase from "./DialogBase.vue";
+import PasswordInput from "./PasswordInput.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -495,7 +496,7 @@ onUnmounted(() => {
           </div>
           <div class="form-row">
             <label>{{ t("Password / Token") }}</label>
-            <input v-model="password" type="password" @input="markAuth" />
+            <PasswordInput v-model="password" @input="markAuth" />
           </div>
           <div class="form-row">
             <label class="check-line">

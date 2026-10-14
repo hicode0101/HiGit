@@ -85,7 +85,9 @@ pub struct AppConfig {
     pub show_ignored: bool,
     /// Git 后端选择（预留，见 technical-design §4.1）
     pub git_backend: String,
-    /// 网络代理 URL（FR-10.4）：空 = 直连；如 socks5://127.0.0.1:10808
+    /// 网络代理开关（FR-10.4）：false = 直连，true = 使用 proxy 字段
+    pub proxy_enabled: bool,
+    /// 网络代理 URL（FR-10.4）：仅在 proxy_enabled 开启时生效；如 socks5://127.0.0.1:1080
     pub proxy: String,
 }
 
@@ -93,13 +95,14 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             language: String::new(),
-            theme: "system".to_string(),
+            theme: "light".to_string(),
             recent_repos: Vec::new(),
             last_repo: String::new(),
             auto_refresh: true,
             show_ignored: false,
             git_backend: "git2".to_string(),
-            proxy: String::new(),
+            proxy_enabled: false,
+            proxy: "socks5://127.0.0.1:1080".to_string(),
         }
     }
 }
@@ -231,6 +234,24 @@ mod tests {
         let path = std::env::temp_dir().join("higit-cfg-missing-does-not-exist.json");
         let _ = std::fs::remove_file(&path);
         assert!(load_from(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn defaults_language_empty_theme_light_proxy_toggle_off() {
+        // 默认：语言跟随系统（空）、主题浅色、代理关闭但预填默认地址
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.language, "");
+        assert_eq!(cfg.theme, "light");
+        assert!(!cfg.proxy_enabled);
+        assert_eq!(cfg.proxy, "socks5://127.0.0.1:1080");
+    }
+
+    #[test]
+    fn legacy_config_without_proxy_enabled_defaults_to_off() {
+        // 旧版配置无 proxy_enabled 字段：serde(default) 补齐为关闭，避免旧配置意外启用代理
+        let legacy = r#"{"language":"","theme":"system","recent_repos":[],"auto_refresh":true,"show_ignored":false,"git_backend":"git2","proxy":""}"#;
+        let cfg: AppConfig = serde_json::from_str(legacy).unwrap();
+        assert!(!cfg.proxy_enabled);
     }
 
     #[test]

@@ -1,15 +1,17 @@
 <script setup lang="ts">
 /** 欢迎页（FR-5.5 空状态）：新建 / 克隆 / 添加本地仓库 三入口卡片 */
+import { computed } from "vue";
 import { store } from "../store";
 import { addLocalRepoAction } from "../tasks";
 import { t } from "../i18n";
 import IconGlyph from "./IconGlyph.vue";
 
-const cards = [
+// computed 包裹：文案跟随语言切换实时刷新（setup 常量会在切换语言后残留旧文案）
+const cards = computed(() => [
   { name: "new", icon: "new-repo", title: t("New Repository"), desc: t("Create a repository from a local directory") },
   { name: "clone", icon: "clone", title: t("Clone Repository"), desc: t("Clone an existing repository from a URL") },
   { name: "add", icon: "folder-open", title: t("Add Local Repository"), desc: t("Open a repository that already exists on disk") },
-];
+]);
 
 function onAction(name: string) {
   if (name === "new") store.ui.newRepo = true;

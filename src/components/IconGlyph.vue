@@ -60,6 +60,9 @@ const ICONS: Record<string, string> = {
   legend: '<path d="M4 6h2M4 12h2M4 18h2M9 6h11M9 12h11M9 18h11"/>',
   restore: '<path d="M4 8h5V3M4 8a8.5 8.5 0 1 1-1 6"/>',
   sort: '<path d="M7 5v14M7 19l-3-3M7 19l3-3M17 19V5M17 5l-3 3M17 5l3 3"/>',
+  eye: '<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/>',
+  "eye-off":
+    '<path d="M4 4l16 16"/><path d="M9.9 5.2A9.4 9.4 0 0 1 12 5c6 0 9.5 7 9.5 7a17.6 17.6 0 0 1-3.1 3.9M6.7 6.7A16.8 16.8 0 0 0 2.5 12S6 19 12 19a9.4 9.4 0 0 0 3.3-.6"/><path d="M9.9 9.9a2.8 2.8 0 0 0 4 4"/>',
 };
 
 const inner = () => ICONS[props.name] ?? ICONS.file;

@@ -11,3 +11,7 @@ pub mod model;
 
 #[cfg(feature = "backend-git2")]
 pub(crate) mod backend_git2;
+
+/// 暴露给应用层的密钥兼容性探测（纯函数，不泄漏 git2 类型，不违反 CR-1）。
+#[cfg(feature = "backend-git2")]
+pub use backend_git2::ssh_key_backend_supported;

@@ -25,6 +25,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_repo_settings,
+            commands::repo_credential_saved,
             commands::save_config,
             commands::list_repos,
             commands::add_local_repo,

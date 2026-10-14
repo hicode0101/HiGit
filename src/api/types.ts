@@ -103,6 +103,7 @@ export interface ConfigDto {
   autoRefresh: boolean;
   showIgnored: boolean;
   gitBackend: string;
+  proxyEnabled: boolean;
   proxy: string;
 }
 

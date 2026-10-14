@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 工具栏（原型图1）：高频操作一键直达 + 主题 / 语言切换 */
 import { computed } from "vue";
-import { store, persistConfig, toast } from "../store";
+import { store, persistConfig, toast, applyLanguage } from "../store";
 import { t, currentLocale } from "../i18n";
 import IconGlyph from "./IconGlyph.vue";
 
@@ -36,6 +36,8 @@ function toggleTheme() {
 function toggleLang() {
   const next = currentLocale() === "zh-CN" ? "en" : "zh-CN";
   void persistConfig({ language: next });
+  // 立即应用新语言：watchConfig 的 watch 是异步触发，直接 toast 会取到旧语言的文案
+  applyLanguage();
   toast(t("Switch Language"));
 }
 </script>

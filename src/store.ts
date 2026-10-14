@@ -204,7 +204,7 @@ export function showError(err: CommandErrorDto | HigitApiError | Error) {
 // ---------- 主题 / 语言 ----------
 
 export function effectiveTheme(): "light" | "dark" {
-  const theme = store.config?.theme ?? "system";
+  const theme = store.config?.theme ?? "light";
   if (theme === "light" || theme === "dark") return theme;
   return store.systemTheme;
 }

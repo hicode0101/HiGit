@@ -66,6 +66,7 @@ export const api = {
   closeRepo: () => invoke<void>("close_repo"),
   destStatus: (path: string) => invoke<string>("dest_status", { path }),
   getRepoSettings: (id: string) => invoke<RepoEntryDto>("get_repo_settings", { id }),
+  repoCredentialSaved: (id: string) => invoke<boolean>("repo_credential_saved", { id }),
   saveRepoSettings: (req: {
     id?: string | null;
     path: string;
@@ -73,6 +74,8 @@ export const api = {
     auth: { kind: "http" | "ssh"; username: string; keyPath: string } | null;
     url: string;
     identity: IdentityDto | null;
+    password?: string;
+    rememberCred?: boolean;
   }) => invoke<void>("save_repo_settings", { req }),
   newRepo: (req: {
     parentDir: string;

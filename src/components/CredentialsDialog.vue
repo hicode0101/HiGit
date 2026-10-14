@@ -6,6 +6,7 @@ import { api } from "../api";
 import { t } from "../i18n";
 import { retrySyncWithCreds } from "../tasks";
 import DialogBase from "./DialogBase.vue";
+import PasswordInput from "./PasswordInput.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -71,7 +72,7 @@ async function submit() {
       </div>
       <div class="form-row">
         <label>{{ t("Password / Token") }}</label>
-        <input v-model="secret" type="password" @keydown.enter="submit" />
+        <PasswordInput v-model="secret" @keydown.enter="submit" />
       </div>
     </template>
     <template v-else>
@@ -84,7 +85,7 @@ async function submit() {
       </div>
       <div class="form-row">
         <label>{{ t("Passphrase") }}</label>
-        <input v-model="passphrase" type="password" @keydown.enter="submit" />
+        <PasswordInput v-model="passphrase" @keydown.enter="submit" />
       </div>
     </template>
 
