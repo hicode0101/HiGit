@@ -1,0 +1,99 @@
+/* HiGit 主题 token：浅 / 深两套设计变量（Fluent 风格，需求 §5.2） */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-window: #f3f3f3;
+  --bg-titlebar: #f8f8f8;
+  --bg-menubar: #f8f8f8;
+  --bg-toolbar: #fbfbfb;
+  --bg-sidebar: #f6f6f6;
+  --bg-card: #ffffff;
+  --bg-card-selected: #e8f1fa;
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-active: rgba(0, 0, 0, 0.08);
+  --bg-input: #ffffff;
+  --bg-dialog: #ffffff;
+  --bg-statusbar: #f3f3f3;
+  --bg-code: #f6f6f6;
+
+  --text-primary: #1b1b1b;
+  --text-secondary: #5d5d5d;
+  --text-tertiary: #8a8a8a;
+  --text-disabled: #b0b0b0;
+  --text-accent-on: #ffffff;
+
+  --border-color: #e0e0e0;
+  --border-strong: #cfcfcf;
+  --divider: #e8e8e8;
+
+  --accent: #0067c0;
+  --accent-hover: #1975c5;
+  --accent-active: #0f5da3;
+  --accent-subtle: rgba(0, 103, 192, 0.08);
+
+  --status-clean: #8a8a8a;
+  --status-modified: #c78301;
+  --status-staged: #0f7b0f;
+  --status-untracked: #0f7b0f;
+  --status-deleted: #c42b1c;
+  --status-conflict: #d13438;
+  --status-ignored: #9d9d9d;
+
+  --shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.1);
+  --shadow-menu: 0 8px 24px rgba(0, 0, 0, 0.14), 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05);
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  --font-ui: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-window: #202020;
+  --bg-titlebar: #272727;
+  --bg-menubar: #272727;
+  --bg-toolbar: #242424;
+  --bg-sidebar: #272727;
+  --bg-card: #2d2d2d;
+  --bg-card-selected: #3b4f66;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --bg-input: #2d2d2d;
+  --bg-dialog: #2d2d2d;
+  --bg-statusbar: #202020;
+  --bg-code: #1d1d1d;
+
+  --text-primary: #ffffff;
+  --text-secondary: #c8c8c8;
+  --text-tertiary: #9a9a9a;
+  --text-disabled: #6b6b6b;
+  --text-accent-on: #ffffff;
+
+  --border-color: #3d3d3d;
+  --border-strong: #4d4d4d;
+  --divider: #383838;
+
+  --accent: #4cc2ff;
+  --accent-hover: #60ccff;
+  --accent-active: #47b1e8;
+  --accent-subtle: rgba(76, 194, 255, 0.1);
+
+  --status-clean: #9a9a9a;
+  --status-modified: #f8b424;
+  --status-staged: #6ccb5f;
+  --status-untracked: #6ccb5f;
+  --status-deleted: #ff99a4;
+  --status-conflict: #ff6b6b;
+  --status-ignored: #7a7a7a;
+
+  --shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-menu: 0 8px 24px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25);
+}

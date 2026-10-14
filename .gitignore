@@ -1,0 +1,12 @@
+# Node
+node_modules/
+dist/
+
+# Rust
+target/
+
+# Tauri generated
+src-tauri/gen/
+
+# Logs
+*.log

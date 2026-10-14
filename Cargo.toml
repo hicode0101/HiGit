@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "src-tauri",
+    "crates/higit-git",
+    "crates/higit-core",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["HiGit contributors"]
+
+[workspace.dependencies]
+git2 = { version = "0.21", features = ["https", "ssh"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "7"
+notify = "8"
+sys-locale = "0.3"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+uuid = { version = "1", features = ["v4"] }
+higit-git = { path = "crates/higit-git" }
+higit-core = { path = "crates/higit-core" }
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
