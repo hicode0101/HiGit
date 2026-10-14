@@ -5,6 +5,7 @@ import { store, showError, toast, refreshRepos, refreshIdentity } from "../store
 import { api } from "../api";
 import type { RepoEntryDto } from "../api/types";
 import { t } from "../i18n";
+import { detectAuthFromUrl } from "../urlAuth";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
 
@@ -62,6 +63,20 @@ async function chooseKey() {
   if (file && typeof file === "string") keyPath.value = file;
 }
 
+// 修改远端 URL 时按格式自动切换认证方式（认证页随之联动）：
+// https://host/用户名/... → HTTPS（用户名留空时填 URL 里的用户名段）；
+// git@host:path / ssh://user@host/... → SSH（用户名取 @ 前的值，缺省 git）
+function onUrlInput() {
+  const d = detectAuthFromUrl(url.value);
+  if (!d) return;
+  authKind.value = d.kind;
+  if (d.kind === "ssh") {
+    username.value = d.username || "git";
+  } else if (!username.value.trim() && d.username) {
+    username.value = d.username;
+  }
+}
+
 async function save() {
   const e = entry.value;
   if (!e) return;
@@ -115,7 +130,7 @@ async function save() {
       </div>
       <div class="form-row">
         <label>{{ t("Remote repository URL") }} — {{ t("Push / pull target remote; leave empty to follow the repository git config") }}</label>
-        <input v-model="url" placeholder="https://github.com/user/repo.git" />
+        <input v-model="url" placeholder="https://github.com/user/repo.git" @input="onUrlInput" />
       </div>
     </div>
 

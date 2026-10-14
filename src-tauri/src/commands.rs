@@ -1132,6 +1132,7 @@ fn creds_to_stored(c: &Credentials) -> higit_core::credentials::StoredCredential
             username,
             key_path,
             passphrase,
+            ..
         } => higit_core::credentials::StoredCredential {
             kind: "ssh".into(),
             username: username.clone(),
@@ -1162,6 +1163,7 @@ fn stored_to_creds(
             },
             key_path: stored.key_path.clone(),
             passphrase: stored.secret.clone(),
+            from_store: true,
         }
     } else {
         Credentials::UserPass {
@@ -1308,6 +1310,7 @@ fn ssh_creds_from_entry(state: &AppState, repo: &Path) -> Option<Credentials> {
                 },
                 key_path: auth.key_path.clone(),
                 passphrase: String::new(),
+                from_store: false,
             })
         })
 }

@@ -416,6 +416,7 @@ impl CredsDto {
                 username: self.username,
                 key_path: self.key_path,
                 passphrase: self.passphrase,
+                from_store: false,
             }
         } else {
             higit_git::engine::Credentials::UserPass {

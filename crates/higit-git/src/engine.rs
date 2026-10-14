@@ -60,7 +60,7 @@ pub struct CloneRequest {
 
 /// 网络凭证（FR-5.5 / FR-5.6）：clone / fetch / push / pull 共用。
 /// SSH 的 `key_path` 为空表示依次尝试 ssh-agent 与 `~/.ssh` 默认密钥。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Credentials {
     /// HTTPS 基础认证（用户名 + 密码 / Token）
     UserPass { username: String, password: String },
@@ -69,7 +69,73 @@ pub enum Credentials {
         username: String,
         key_path: String,
         passphrase: String,
+        /// true = 来自系统凭证管理器的"记住"凭证（认证日志显示为"记住的密钥"，
+        /// 区别于仓库设置里显式配置的"配置的密钥"）
+        from_store: bool,
     },
+}
+
+/// 相等性只比凭证内容、忽略 `from_store` 来源标记：
+/// 凭证重试链用它判断"已用凭证与记住的凭证相同则不再重试"。
+impl PartialEq for Credentials {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::UserPass { username, password },
+                Self::UserPass {
+                    username: u2,
+                    password: p2,
+                },
+            ) => username == u2 && password == p2,
+            (
+                Self::SshKey {
+                    username,
+                    key_path,
+                    passphrase,
+                    ..
+                },
+                Self::SshKey {
+                    username: u2,
+                    key_path: k2,
+                    passphrase: p2,
+                    ..
+                },
+            ) => username == u2 && key_path == k2 && passphrase == p2,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Credentials {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_eq_ignores_from_store() {
+        let explicit = Credentials::SshKey {
+            username: "git".into(),
+            key_path: "D:/keys/id".into(),
+            passphrase: String::new(),
+            from_store: false,
+        };
+        let stored = Credentials::SshKey {
+            username: "git".into(),
+            key_path: "D:/keys/id".into(),
+            passphrase: String::new(),
+            from_store: true,
+        };
+        // 内容相同、来源不同：视为同一凭证（重试链据此跳过无意义的重试）
+        assert_eq!(explicit, stored);
+        let different = Credentials::SshKey {
+            username: "git".into(),
+            key_path: "D:/keys/other".into(),
+            passphrase: String::new(),
+            from_store: true,
+        };
+        assert_ne!(explicit, different);
+    }
 }
 
 /// push 结果（FR-5.2）。

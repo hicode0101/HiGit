@@ -135,6 +135,7 @@ impl Git2Backend {
                 username: String::new(),
                 key_path: String::new(),
                 passphrase: String::new(),
+                from_store: false,
             }),
             auth,
         );
@@ -792,6 +793,7 @@ impl GitEngine for Git2Backend {
                     username: String::new(),
                     key_path: String::new(),
                     passphrase: String::new(),
+                    from_store: false,
                 }),
                 Some(&auth),
             );
@@ -2083,6 +2085,7 @@ fn build_callbacks<'a>(
             username: String::new(),
             key_path: String::new(),
             passphrase: String::new(),
+            from_store: false,
         }),
         None,
     );
@@ -2183,26 +2186,41 @@ fn ssh_steps(configured: bool, agent_available: bool) -> &'static [SshStep] {
 /// 显式配置的 SSH 密钥能否被当前 libgit2 加密后端解析。
 ///
 /// libgit2 的 libssh2 在 Windows 默认 WinCNG 后端：只能解析 PEM（PKCS#1）RSA / DSA
-/// 私钥，无法处理 OpenSSH 容器（ed25519 等新格式）与 PKCS#8。这类密钥交给 libgit2 后，
-/// 解析失败会直接终止会话且不再回调凭证链（见 [`apply_credentials`] 注释），链路无法
-/// 回退 agent——因此按文件头嗅探格式，不支持的直接跳过 Configured 步（同步对话框会
-/// 提示降级到 ssh-agent）。
+/// 私钥，无法处理 OpenSSH 容器（ed25519 等新格式）、PKCS#8 与 PuTTY .ppk。这类密钥
+/// 交给 libgit2 后，解析失败会直接终止会话且不再回调凭证链（见 [`apply_credentials`]
+/// 注释），链路无法回退 agent——因此按文件头嗅探格式，不支持的直接跳过 Configured 步
+/// （同步对话框会提示降级到 ssh-agent）。
 ///
 /// 文件不存在 / 不可读时返回 true：凭证构造会失败并正常进入链路下一步。
 pub fn ssh_key_backend_supported(key_path: &str) -> bool {
+    ssh_key_backend_issue(key_path).is_none()
+}
+
+/// 密钥格式不受当前引擎支持的具体原因（None = 可用或无法判断）。
+/// 原因文案直接进同步对话框日志，指引用户转换成受支持的 PEM 格式。
+fn ssh_key_backend_issue(key_path: &str) -> Option<&'static str> {
     use std::io::Read;
     let mut buf = [0u8; 64];
     let n = std::fs::File::open(key_path)
         .and_then(|mut f| f.read(&mut buf))
         .unwrap_or(0);
     if n == 0 {
-        return true;
+        return None;
     }
     let head = String::from_utf8_lossy(&buf[..n]);
-    !head.contains("BEGIN OPENSSH PRIVATE KEY") // OpenSSH 容器（ed25519 等）
-        && !head.contains("BEGIN PRIVATE KEY") // PKCS#8
-        && !head.contains("BEGIN ENCRYPTED PRIVATE KEY")
-        && !head.contains("BEGIN EC PRIVATE KEY")
+    if head.contains("PuTTY-User-Key-File") {
+        // PuTTY 私钥容器（.ppk），libssh2 无解析器
+        Some("PuTTY .ppk 格式不受当前引擎支持，请用 PuTTYgen 导出为 PEM 格式")
+    } else if head.contains("BEGIN OPENSSH PRIVATE KEY") {
+        // OpenSSH 新容器（ed25519 等），WinCNG 后端无法解析
+        Some("OpenSSH 新格式不受当前引擎支持，请转换为 PEM 格式（RSA / DSA）")
+    } else if head.contains("BEGIN PRIVATE KEY") || head.contains("BEGIN ENCRYPTED PRIVATE KEY") {
+        Some("PKCS#8 格式不受当前引擎支持，请转换为 PEM 格式（RSA / DSA）")
+    } else if head.contains("BEGIN EC PRIVATE KEY") {
+        Some("EC 私钥不受当前引擎支持，请使用 PEM 格式的 RSA / DSA 密钥")
+    } else {
+        None
+    }
 }
 
 /// 凭证链步骤日志（同步对话框详细日志）：每一步验证的尝试 / 结果实时上报到 `on_event`；
@@ -2265,17 +2283,18 @@ fn apply_credentials<'a>(
             username,
             key_path,
             passphrase,
+            from_store,
         } => {
             let agent_available = ssh_agent_available();
-            let configured = !key_path.is_empty() && ssh_key_backend_supported(key_path);
+            // 日志里的凭证来源：仓库设置 / 对话框显式配置 vs 系统凭证管理器"记住"的凭证
+            let origin = if *from_store { "记住的密钥" } else { "配置的密钥" };
+            let issue = (!key_path.is_empty())
+                .then(|| ssh_key_backend_issue(key_path))
+                .unwrap_or(None);
+            let configured = issue.is_none();
             // 配置了密钥但引擎后端无法解析：显式提示降级（同步对话框日志）
-            if let Some(a) = auth {
-                if !key_path.is_empty() && !configured {
-                    a.log(
-                        "warn",
-                        format!("认证: 跳过 配置的密钥 {key_path}（格式不受当前引擎支持）"),
-                    );
-                }
+            if let (Some(a), Some(reason)) = (auth.as_ref(), issue) {
+                a.log("warn", format!("认证: 跳过 {origin} {key_path}（{reason}）"));
             }
             (
                 None,
@@ -2283,6 +2302,7 @@ fn apply_credentials<'a>(
                     username.clone(),
                     key_path.clone(),
                     passphrase.clone(),
+                    origin,
                     ssh_steps(configured, agent_available),
                 )),
             )
@@ -2328,7 +2348,7 @@ fn apply_credentials<'a>(
                 "authentication required but no usable credential",
             ));
         }
-        let Some((_, key_path, passphrase, steps)) = &ssh else {
+        let Some((_, key_path, passphrase, origin, steps)) = &ssh else {
             return Cred::default();
         };
         let name = cfg_user
@@ -2341,10 +2361,10 @@ fn apply_credentials<'a>(
             let cred: Option<(Cred, String)> = match step {
                 SshStep::Configured => match Cred::ssh_key(&name, None, Path::new(key_path), pass)
                 {
-                    Ok(c) => Some((c, format!("配置的密钥 {key_path}"))),
+                    Ok(c) => Some((c, format!("{origin} {key_path}"))),
                     Err(_) => {
                         if let Some(a) = auth {
-                            a.log("dim", format!("认证: 跳过 配置的密钥 {key_path}（不可用）"));
+                            a.log("dim", format!("认证: 跳过 {origin} {key_path}（不可用）"));
                         }
                         None
                     }
@@ -2364,6 +2384,17 @@ fn apply_credentials<'a>(
                         for f in ["id_ed25519", "id_ecdsa", "id_rsa"] {
                             let p = home.join(".ssh").join(f);
                             if !p.exists() {
+                                continue;
+                            }
+                            // 默认密钥同样可能是引擎解析不了的格式：解析失败会终止
+                            // 会话且不再回调，必须先嗅探跳过才能落到后面的默认密钥
+                            if let Some(reason) = ssh_key_backend_issue(&p.to_string_lossy()) {
+                                if let Some(a) = auth {
+                                    a.log(
+                                        "dim",
+                                        format!("认证: 跳过 默认密钥 ~/.ssh/{f}（{reason}）"),
+                                    );
+                                }
                                 continue;
                             }
                             let desc = format!("默认密钥 ~/.ssh/{f}");
@@ -2656,7 +2687,7 @@ mod tests {
             std::fs::write(&p, head).unwrap();
             p.to_string_lossy().into_owned()
         };
-        // WinCNG 无法解析的格式：OpenSSH 容器 / PKCS#8 / EC → 不进链路
+        // WinCNG 无法解析的格式：OpenSSH 容器 / PKCS#8 / EC / PuTTY .ppk → 不进链路
         assert!(!ssh_key_backend_supported(&write(
             "openssh.key",
             "-----BEGIN OPENSSH PRIVATE KEY-----\nabc"
@@ -2668,6 +2699,10 @@ mod tests {
         assert!(!ssh_key_backend_supported(&write(
             "ec.key",
             "-----BEGIN EC PRIVATE KEY-----\nabc"
+        )));
+        assert!(!ssh_key_backend_supported(&write(
+            "putty.ppk",
+            "PuTTY-User-Key-File-3: ssh-rsa\nEncryption: none\nComment: \n"
         )));
         // PEM RSA / DSA：可用
         assert!(ssh_key_backend_supported(&write(
