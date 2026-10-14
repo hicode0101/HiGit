@@ -100,13 +100,29 @@
 pnpm install            # 安装前端依赖
 pnpm tauri dev          # 开发运行（vite dev server + tauri）
 pnpm tauri build        # 发布构建（Windows 产出 NSIS 安装包等）
-cargo test --workspace  # 全量测试（45 项，见下）
+cargo test --workspace  # 全量测试（49 项，见下）
 ```
 
-**测试构成（45 项）**：git2 引擎冒烟 28 · 引擎单元 6（差异统计 3 + SSH 凭证 3）· 应用配置 7 · gitignore 模板 3 · 凭证存储 1
+**测试构成（49 项）**：git2 引擎冒烟 28 · 引擎单元 10（差异统计 3 + SSH 凭证 6 + 凭证相等性 1）· 应用配置 7 · gitignore 模板 3 · 凭证存储 1
 
-> 注意：若本机 5173 端口被保留策略限制（Windows 排除端口段），`pnpm tauri dev` 会报
+> 注意：若本机 1420 端口被保留策略限制（Windows 排除端口段），`pnpm tauri dev` 会报
 > `listen EACCES`；可在 `vite.config.ts` 与 `src-tauri/tauri.conf.json` 中改用其他端口。
+
+### 📦 自动发布（GitHub Actions）
+
+推送 `v*` 格式的 tag（如 `v1.2.3`）即触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)：
+先用 `scripts/sync-version.mjs` 把 tag 版本号同步到三处版本源——`src-tauri/tauri.conf.json`
+（安装包元数据与“关于”对话框显示的版本）、根 `Cargo.toml` 的 `[workspace.package].version`
+（exe 程序集属性）、`package.json`——再构建安装包并自动发布同版本号的 GitHub Release。
+
+| 平台 | Runner | 产物 |
+| ---- | ------ | ---- |
+| Windows | windows-latest | NSIS / MSI 安装包 |
+| macOS Apple Silicon | macos-latest（原生） | App / DMG（aarch64） |
+| macOS Intel | macos-latest（M 系列上交叉编译） | App / DMG（x86_64） |
+| Linux | ubuntu-22.04 | deb / rpm / AppImage |
+
+版本号只接受 `x.y.z` 纯数字三段式（MSI 不支持预发布后缀），因此请使用 `v1.2.3` 这类纯版本 tag。
 
 ## 📁 目录结构
 

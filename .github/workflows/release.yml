@@ -1,0 +1,90 @@
+# 发布构建（FR：创建带版本号的 tag 自动出包）
+#
+# 触发：推送 v* 格式的 tag（如 v1.2.3）。
+# 流程：每个平台先把 tag 版本同步进 package.json / src-tauri/tauri.conf.json（安装包与
+#       “关于”对话框显示的版本）/ 根 Cargo.toml（exe 程序集属性，tauri-build 嵌入
+#       CARGO_PKG_VERSION），再构建安装包并上传到同版本号的 GitHub Release。
+#
+# 平台矩阵：
+#   - Windows（windows-latest）：NSIS + MSI
+#   - macOS Apple Silicon（macos-latest 原生，aarch64）：App + DMG
+#   - macOS Intel（同一台 M 系列 runner 上交叉编译 x86_64）：App + DMG
+#   - Linux（ubuntu-22.04）：deb / rpm / AppImage
+#
+# 版本号只接受 x.y.z 纯数字三段式（MSI 的 ProductVersion 不支持预发布后缀）。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    permissions:
+      contents: write # 创建 Release 并上传构建产物
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          # Apple Silicon（M 系列）原生构建
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          # Intel 包：放在 M 系列 runner 上交叉编译，不必单独开 Intel 机器
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS 两种架构的编译目标都装上：aarch64 原生，x86_64 交叉编译用
+          targets: ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tag 是唯一版本源：同步三处版本号后再编译，保证产物与“关于”对话框一致
+      - name: Sync version from tag
+        shell: bash
+        run: node scripts/sync-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Build and upload release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "HiGit ${{ github.ref_name }}"
+          releaseBody: "See the assets to download this version and install. 下载对应平台的附件安装。"
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
