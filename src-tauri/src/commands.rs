@@ -1610,27 +1610,19 @@ fn egress_note(url: &str, proxy: Option<&str>, zh: bool) -> String {
             "Network: local path, no network access".to_string()
         };
     }
-    if is_ssh {
-        return if zh {
-            "出网方式: 直连（SSH 连接不走代理）".to_string()
-        } else {
-            "Network: direct connection (SSH does not use proxies)".to_string()
-        };
-    }
     match proxy {
-        Some(p) if !p.trim().is_empty() => {
+        Some(p) if !p.trim().is_empty() && !is_ssh => {
             if zh {
-                format!("出网方式: 走代理 {p}（HiGit 设置 → 网络代理）")
+                format!("出网方式: 走代理 {p}")
             } else {
-                format!("Network: via proxy {p} (HiGit settings)")
+                format!("Network: via proxy {p}")
             }
         }
         _ => {
             if zh {
-                "出网方式: 直连（未启用 HiGit 网络代理；git 的 http.proxy 配置与代理环境变量不参与）"
-                    .to_string()
+                "出网方式: 直连".to_string()
             } else {
-                "Network: direct connection (HiGit proxy is off; git http.proxy config and proxy env vars are not used)".to_string()
+                "Network: direct connection".to_string()
             }
         }
     }
@@ -2674,14 +2666,13 @@ mod net_note_tests {
             None,
             true,
         );
-        assert!(zh.contains("直连"), "zh: {zh}");
-        assert!(zh.contains("http.proxy"), "zh 应提示 git 配置不参与: {zh}");
+        assert_eq!(zh, "出网方式: 直连");
         let en = egress_note(
             "https://github.com/hicode0101/HiGit.git",
             None,
             false,
         );
-        assert!(en.contains("direct"), "en: {en}");
+        assert_eq!(en, "Network: direct connection");
     }
 
     #[test]
