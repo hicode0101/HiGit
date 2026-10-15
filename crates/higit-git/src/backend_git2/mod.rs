@@ -2185,11 +2185,13 @@ fn ssh_steps(configured: bool, agent_available: bool) -> &'static [SshStep] {
 
 /// 显式配置的 SSH 密钥能否被当前 libgit2 加密后端解析。
 ///
-/// libgit2 的 libssh2 在 Windows 默认 WinCNG 后端：只能解析 PEM（PKCS#1）RSA / DSA
-/// 私钥，无法处理 OpenSSH 容器（ed25519 等新格式）、PKCS#8 与 PuTTY .ppk。这类密钥
-/// 交给 libgit2 后，解析失败会直接终止会话且不再回调凭证链（见 [`apply_credentials`]
-/// 注释），链路无法回退 agent——因此按文件头嗅探格式，不支持的直接跳过 Configured 步
-/// （同步对话框会提示降级到 ssh-agent）。
+/// libgit2 的 libssh2 私钥解析取决于编译时的加密后端，三平台已统一为 OpenSSL：
+/// Windows 经 openssl-on-win32 开启（见 higit-git Cargo.toml，默认的 WinCNG 后端
+/// 只认 PKCS#1 的 RSA / DSA），Unix 由 vendored-openssl 提供。OpenSSL 后端可解析
+/// OpenSSH 容器（ed25519 等新格式）、PKCS#8、EC 与 PKCS#1 PEM，唯一没有解析器的
+/// 是 PuTTY .ppk 容器。.ppk 交给 libgit2 后，解析失败会直接终止会话且不再回调凭证链
+/// （见 [`apply_credentials`] 注释），链路无法回退 agent——因此按文件头嗅探格式，
+/// 不支持的直接跳过 Configured 步（同步对话框会提示降级到 ssh-agent）。
 ///
 /// 文件不存在 / 不可读时返回 true：凭证构造会失败并正常进入链路下一步。
 pub fn ssh_key_backend_supported(key_path: &str) -> bool {
@@ -2197,7 +2199,7 @@ pub fn ssh_key_backend_supported(key_path: &str) -> bool {
 }
 
 /// 密钥格式不受当前引擎支持的具体原因（None = 可用或无法判断）。
-/// 原因文案直接进同步对话框日志，指引用户转换成受支持的 PEM 格式。
+/// 原因文案直接进同步对话框日志，指引用户转换成受支持的格式。
 fn ssh_key_backend_issue(key_path: &str) -> Option<&'static str> {
     use std::io::Read;
     let mut buf = [0u8; 64];
@@ -2209,15 +2211,8 @@ fn ssh_key_backend_issue(key_path: &str) -> Option<&'static str> {
     }
     let head = String::from_utf8_lossy(&buf[..n]);
     if head.contains("PuTTY-User-Key-File") {
-        // PuTTY 私钥容器（.ppk），libssh2 无解析器
-        Some("PuTTY .ppk 格式不受当前引擎支持，请用 PuTTYgen 导出为 PEM 格式")
-    } else if head.contains("BEGIN OPENSSH PRIVATE KEY") {
-        // OpenSSH 新容器（ed25519 等），WinCNG 后端无法解析
-        Some("OpenSSH 新格式不受当前引擎支持，请转换为 PEM 格式（RSA / DSA）")
-    } else if head.contains("BEGIN PRIVATE KEY") || head.contains("BEGIN ENCRYPTED PRIVATE KEY") {
-        Some("PKCS#8 格式不受当前引擎支持，请转换为 PEM 格式（RSA / DSA）")
-    } else if head.contains("BEGIN EC PRIVATE KEY") {
-        Some("EC 私钥不受当前引擎支持，请使用 PEM 格式的 RSA / DSA 密钥")
+        // PuTTY 私钥容器（.ppk），libssh2 的 OpenSSL / WinCNG 后端均无解析器
+        Some("PuTTY .ppk 格式不受当前引擎支持，请用 PuTTYgen 导出为 OpenSSH / PEM 格式")
     } else {
         None
     }
@@ -2687,22 +2682,23 @@ mod tests {
             std::fs::write(&p, head).unwrap();
             p.to_string_lossy().into_owned()
         };
-        // WinCNG 无法解析的格式：OpenSSH 容器 / PKCS#8 / EC / PuTTY .ppk → 不进链路
-        assert!(!ssh_key_backend_supported(&write(
-            "openssh.key",
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc"
-        )));
-        assert!(!ssh_key_backend_supported(&write(
-            "pkcs8.key",
-            "-----BEGIN PRIVATE KEY-----\nabc"
-        )));
-        assert!(!ssh_key_backend_supported(&write(
-            "ec.key",
-            "-----BEGIN EC PRIVATE KEY-----\nabc"
-        )));
+        // 三平台 libssh2 统一 OpenSSL 后端：仅 .ppk 无解析器 → 不进链路
         assert!(!ssh_key_backend_supported(&write(
             "putty.ppk",
             "PuTTY-User-Key-File-3: ssh-rsa\nEncryption: none\nComment: \n"
+        )));
+        // OpenSSH 容器（ed25519）/ PKCS#8 / EC / PEM RSA：引擎均可直接解析
+        assert!(ssh_key_backend_supported(&write(
+            "openssh.key",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc"
+        )));
+        assert!(ssh_key_backend_supported(&write(
+            "pkcs8.key",
+            "-----BEGIN PRIVATE KEY-----\nabc"
+        )));
+        assert!(ssh_key_backend_supported(&write(
+            "ec.key",
+            "-----BEGIN EC PRIVATE KEY-----\nabc"
         )));
         // PEM RSA / DSA：可用
         assert!(ssh_key_backend_supported(&write(

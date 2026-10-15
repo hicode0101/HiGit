@@ -1393,6 +1393,7 @@ name = "higit-git"
 version = "1.0.0"
 dependencies = [
  "git2",
+ "libssh2-sys",
  "windows-sys 0.59.0",
 ]
 

@@ -24,3 +24,9 @@ git2 = { workspace = true, optional = true, features = ["vendored-openssl"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+# 让 libgit2 内嵌的 libssh2 在 Windows 上也用 OpenSSL 后端解析私钥。默认的 WinCNG
+# 后端只认 PKCS#1 的 RSA / DSA，无法使用 OpenSSH 容器（ed25519）、PKCS#8 与 EC 密钥；
+# 开启后三平台统一 OpenSSL 后端，仅 PuTTY .ppk 不支持。feature 经依赖图合并到
+# git2 → libgit2-sys → libssh2-sys 的同一次构建上，vendored 无需系统安装 OpenSSL
+# （需 Perl；NASM 缺失时 openssl-src 自动 no-asm）。
+libssh2-sys = { version = "0.3", features = ["openssl-on-win32", "vendored-openssl"] }
