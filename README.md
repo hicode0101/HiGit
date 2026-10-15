@@ -14,7 +14,7 @@
 
 *A zero-dependency, cross-platform Git client. Tauri 2 (Vue 3 + TypeScript) UI with a Rust backend — no Git installation required.*
 
-<img src="docs/screenshots/tauri-light-hidnslog.png" width="920" alt="HiGit 主界面"/>
+<img src="docs/screenshots/HiGit-1.png" width="920" alt="HiGit 主界面"/>
 
 </div>
 
