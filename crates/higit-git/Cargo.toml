@@ -15,7 +15,11 @@ backend-cli = []
 [dependencies]
 git2 = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# Unix（Linux/macOS）统一从源码编译 OpenSSL（vendored）：macOS Intel 包是在
+# M 系列 runner 上交叉编译的，系统里只有 arm64 的 Homebrew OpenSSL，openssl-sys
+# 找不到 x86_64 的库会直接构建失败（release.yml 的 x86_64-apple-darwin job）。
+# macOS 上 libgit2 实际走 SecureTransport，这里的 OpenSSL 只是满足 openssl-sys 构建。
+[target.'cfg(unix)'.dependencies]
 git2 = { workspace = true, optional = true, features = ["vendored-openssl"] }
 
 [target.'cfg(windows)'.dependencies]
