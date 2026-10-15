@@ -9,7 +9,7 @@ import DialogBase from "./DialogBase.vue";
 const emit = defineEmits<{ close: [] }>();
 
 /** 开启代理时的默认地址（引擎只对 HTTP 代理稳定可用，socks 不建议） */
-const DEFAULT_PROXY = "http://127.0.0.1:7890";
+const DEFAULT_PROXY = "http://127.0.0.1:8080";
 /** 邮箱格式：非空白@非空白.非空白（宽松校验，避免误拒合法地址） */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -104,11 +104,11 @@ async function save() {
         <input
           v-model="store.config!.proxy"
           :disabled="!store.config!.proxyEnabled"
-          placeholder="http://127.0.0.1:7890"
+          placeholder="http://127.0.0.1:8080"
         />
         <span class="hint">{{ t("Applied to clone / fetch / push / pull when enabled.") }}</span>
         <span v-if="socksHint" class="hint warn-hint">
-          {{ t("SOCKS proxies are unreliable with the built-in engine (often timeouts). Prefer an HTTP proxy address, e.g. http://127.0.0.1:7890.") }}
+          {{ t("SOCKS proxies are unreliable with the built-in engine (often timeouts). Prefer an HTTP proxy address, e.g. http://127.0.0.1:8080.") }}
         </span>
       </div>
     </div>

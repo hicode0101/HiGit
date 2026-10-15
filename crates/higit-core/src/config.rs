@@ -104,7 +104,7 @@ impl Default for AppConfig {
             show_ignored: false,
             git_backend: "git2".to_string(),
             proxy_enabled: false,
-            proxy: "http://127.0.0.1:7890".to_string(),
+            proxy: "http://127.0.0.1:8080".to_string(),
         }
     }
 }
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(cfg.language, "");
         assert_eq!(cfg.theme, "light");
         assert!(!cfg.proxy_enabled);
-        assert_eq!(cfg.proxy, "http://127.0.0.1:7890");
+        assert_eq!(cfg.proxy, "http://127.0.0.1:8080");
     }
 
     #[test]
