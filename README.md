@@ -117,7 +117,7 @@ cargo test --workspace  # 全量测试（49 项，见下）
 
 | 平台 | Runner | 产物 |
 | ---- | ------ | ---- |
-| Windows | windows-latest | NSIS / MSI 安装包 |
+| Windows | windows-latest | NSIS / MSI 安装包 + Portable ZIP（免安装单文件，需系统 WebView2 运行时） |
 | macOS Apple Silicon | macos-latest（原生） | App / DMG（aarch64） |
 | macOS Intel | macos-latest（M 系列上交叉编译） | App / DMG（x86_64） |
 | Linux | ubuntu-22.04 | deb / rpm / AppImage |

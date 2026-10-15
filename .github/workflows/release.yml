@@ -6,7 +6,7 @@
 #       CARGO_PKG_VERSION），再构建安装包并上传到同版本号的 GitHub Release。
 #
 # 平台矩阵：
-#   - Windows（windows-latest）：NSIS + MSI
+#   - Windows（windows-latest）：NSIS + MSI + Portable ZIP（免安装单文件）
 #   - macOS Apple Silicon（macos-latest 原生，aarch64）：App + DMG
 #   - macOS Intel（同一台 M 系列 runner 上交叉编译 x86_64）：App + DMG
 #   - Linux（ubuntu-22.04）：deb / rpm / AppImage
@@ -88,3 +88,22 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # Tauri 不内置 Windows portable 产物：主程序 exe 自带全部依赖（前端资源已嵌入，
+      # 无外部 resources），单文件即可运行，这里打成 zip 传到 Release 供免安装使用。
+      # 注意 portable 包不含 setup.exe 的 WebView2 自动安装引导——目标机器需已有
+      # WebView2 运行时（Win11 内置；Win10 多数已装，缺失时从微软官网装一次即可）。
+      # 若未来 bundle 增加外部 resources / sidecar，记得同步打进 zip）。
+      - name: Package and upload portable zip（Windows）
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $exe = 'target/release/higit.exe'
+          Test-Path $exe || throw "未找到主程序 $exe —— 构建产物路径变化了吗？"
+          $zip = "HiGit_${version}_x64_portable.zip"
+          Compress-Archive -Path $exe -DestinationPath $zip -Force
+          gh release upload $env:GITHUB_REF_NAME $zip --clobber
+          Write-Host "已上传 $zip"
