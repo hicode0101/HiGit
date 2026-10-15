@@ -1594,6 +1594,124 @@ pub struct SyncStartReq {
     pub remember: bool,
 }
 
+// ---------- 出网方式 / 认证方式 / 阶段说明（同步与克隆日志共用） ----------
+
+/// 出网方式说明。HiGit 网络操作的代理只来自自身设置（FR-10.4）：开启时 libgit2 以
+/// GIT_PROXY_SPECIFIED 走该代理；未开启时为 GIT_PROXY_NONE 直连，此时 git 配置的
+/// http.proxy 与 http_proxy / HTTPS_PROXY 等环境变量都不参与（libgit2 仅在 AUTO
+/// 模式下读取它们）；SSH 传输由 libssh2 建立 TCP 连接，不经过代理。
+fn egress_note(url: &str, proxy: Option<&str>, zh: bool) -> String {
+    let is_ssh = url.starts_with("git@") || url.starts_with("ssh://");
+    let is_local = !is_ssh && !url.starts_with("http://") && !url.starts_with("https://");
+    if is_local {
+        return if zh {
+            "出网方式: 本地路径，无网络访问".to_string()
+        } else {
+            "Network: local path, no network access".to_string()
+        };
+    }
+    if is_ssh {
+        return if zh {
+            "出网方式: 直连（SSH 连接不走代理）".to_string()
+        } else {
+            "Network: direct connection (SSH does not use proxies)".to_string()
+        };
+    }
+    match proxy {
+        Some(p) if !p.trim().is_empty() => {
+            if zh {
+                format!("出网方式: 走代理 {p}（HiGit 设置 → 网络代理）")
+            } else {
+                format!("Network: via proxy {p} (HiGit settings)")
+            }
+        }
+        _ => {
+            if zh {
+                "出网方式: 直连（未启用 HiGit 网络代理；git 的 http.proxy 配置与代理环境变量不参与）"
+                    .to_string()
+            } else {
+                "Network: direct connection (HiGit proxy is off; git http.proxy config and proxy env vars are not used)".to_string()
+            }
+        }
+    }
+}
+
+/// 生效凭证链的认证方式说明（同步与克隆日志共用，文案与原同步对话框一致）。
+fn auth_note(used: Option<&Credentials>, zh: bool) -> String {
+    match used {
+        Some(Credentials::SshKey {
+            username, key_path, ..
+        }) => {
+            if key_path.is_empty() {
+                if zh {
+                    "认证方式: SSH（ssh-agent / 默认密钥）".to_string()
+                } else {
+                    "Auth: SSH (ssh-agent / default keys)".to_string()
+                }
+            } else if zh {
+                format!("认证方式: SSH 密钥 {key_path}（用户 {username}）")
+            } else {
+                format!("Auth: SSH key {key_path} (user {username})")
+            }
+        }
+        Some(Credentials::UserPass { username, .. }) => {
+            if zh {
+                format!("认证方式: HTTPS（用户 {username}）")
+            } else {
+                format!("Auth: HTTPS (user {username})")
+            }
+        }
+        None => {
+            if zh {
+                "认证方式: 默认（ssh-agent / 默认密钥 / git 凭证链）".to_string()
+            } else {
+                "Auth: default (ssh-agent / default keys / git credential chain)".to_string()
+            }
+        }
+    }
+}
+
+/// 进度阶段切换时的动作说明（同步与克隆日志共用；未知阶段原样输出）。
+fn stage_note(stage: &str, zh: bool) -> String {
+    match stage {
+        "Packing objects" => {
+            if zh {
+                "正在打包对象…".to_string()
+            } else {
+                "Packing objects…".to_string()
+            }
+        }
+        "Pushing objects" => {
+            if zh {
+                "正在推送对象…".to_string()
+            } else {
+                "Pushing objects…".to_string()
+            }
+        }
+        "Receiving objects" => {
+            if zh {
+                "正在接收对象…".to_string()
+            } else {
+                "Receiving objects…".to_string()
+            }
+        }
+        "Resolving deltas" => {
+            if zh {
+                "正在解析增量…".to_string()
+            } else {
+                "Resolving deltas…".to_string()
+            }
+        }
+        _ => stage.to_string(),
+    }
+}
+
+/// 当前 HiGit 设置中生效的网络代理（FR-10.4）：None = 未启用（直连）。
+fn proxy_in_use(state: &AppState) -> Option<String> {
+    let cfg = state.config.lock().unwrap();
+    (cfg.proxy_enabled && !cfg.proxy.trim().is_empty()).then(|| cfg.proxy.trim().to_string())
+}
+
 /// 同步长任务（推送 / 拉取 / 抓取对话框）：与 sync 命令同链路（keyring 重试 / 取消），
 /// 额外产出详细日志（目标地址 / 认证方式 / 待传输内容 / 远端输出 / 逐分支结果）。
 #[tauri::command]
@@ -1691,33 +1809,24 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
             .clone()
             .or_else(|| ssh_creds_from_entry(&state, &repo_path))
             .or_else(|| http_creds_from_store(&state, &repo_path));
+        emit_log("info", auth_note(used.as_ref(), zh));
+
+        // 出网方式（开始前输出）：直连 / 走代理（HiGit 网络代理设置，FR-10.4）
+        let remote_url = {
+            let guard = state.session.lock().unwrap();
+            match guard.as_ref() {
+                Some(h) => state
+                    .engine
+                    .sync_remote(&h.session)
+                    .ok()
+                    .flatten()
+                    .map(|(_, u)| u),
+                None => None,
+            }
+        };
         emit_log(
             "info",
-            match &used {
-                Some(Credentials::SshKey {
-                    username, key_path, ..
-                }) => {
-                    if key_path.is_empty() {
-                        lz(
-                            "认证方式: SSH（ssh-agent / 默认密钥）",
-                            "Auth: SSH (ssh-agent / default keys)",
-                        )
-                    } else {
-                        lz(
-                            &format!("认证方式: SSH 密钥 {key_path}（用户 {username}）"),
-                            &format!("Auth: SSH key {key_path} (user {username})"),
-                        )
-                    }
-                }
-                Some(Credentials::UserPass { username, .. }) => lz(
-                    &format!("认证方式: HTTPS（用户 {username}）"),
-                    &format!("Auth: HTTPS (user {username})"),
-                ),
-                None => lz(
-                    "认证方式: 默认（ssh-agent / 默认密钥 / git 凭证链）",
-                    "Auth: default (ssh-agent / default keys / git credential chain)",
-                ),
-            },
+            egress_note(remote_url.as_deref().unwrap_or(""), proxy_in_use(&state).as_deref(), zh),
         );
 
         // 各操作的预览日志
@@ -1841,14 +1950,7 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                 if let Ok(mut ls) = last_stage.lock() {
                     if *ls != stage {
                         *ls = stage.to_string();
-                        let desc = match stage {
-                            "Packing objects" => lz("正在打包对象…", "Packing objects…"),
-                            "Pushing objects" => lz("正在推送对象…", "Pushing objects…"),
-                            "Receiving objects" => lz("正在接收对象…", "Receiving objects…"),
-                            "Resolving deltas" => lz("正在解析增量…", "Resolving deltas…"),
-                            _ => stage.to_string(),
-                        };
-                        log_for_events("info", desc);
+                        log_for_events("info", stage_note(stage, zh));
                     }
                 }
                 let _ = app_for_events.emit(
@@ -2036,7 +2138,8 @@ pub async fn save_credential(host: String, creds: CredsDto) -> CmdResult<()> {
     .await
 }
 
-/// 克隆长任务（FR-1.2）：进度 + 取消 + keyring 重试链；
+/// 克隆长任务（FR-1.2）：进度 + 取消 + keyring 重试链，经 `sync-log` 事件输出
+/// 与同步对话框一致的详细日志（目标 / 认证 / 出网 / 阶段切换 / 结果 / 耗时）；
 /// 成功后前端收到 repoPath，再调用 open_repo / save_repo_settings 入库认证与身份。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2060,7 +2163,40 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
         state.write_busy.store(true, Ordering::SeqCst);
-        let progress = progress_cb(app.clone(), job_id);
+        let started = std::time::Instant::now();
+        let zh = state.config.lock().unwrap().language == "zh-CN";
+        let app_log = app.clone();
+        let emit_log = move |level: &str, text: String| {
+            let _ = app_log.emit(
+                "sync-log",
+                SyncLogEvent {
+                    job_id,
+                    level: level.to_string(),
+                    text,
+                },
+            );
+        };
+        // 进度事件照旧驱动进度条；阶段切换时补一行动作说明
+        let app_prog = app.clone();
+        let log_for_progress = emit_log.clone();
+        let last_stage = std::sync::Mutex::new(String::new());
+        let progress = move |p: Progress| {
+            if let Ok(mut ls) = last_stage.lock() {
+                if *ls != p.stage {
+                    *ls = p.stage.to_string();
+                    log_for_progress("info", stage_note(p.stage, zh));
+                }
+            }
+            let _ = app_prog.emit(
+                "job-progress",
+                JobProgressEvent {
+                    job_id,
+                    stage: p.stage.to_string(),
+                    done: p.done,
+                    total: p.total,
+                },
+            );
+        };
         let engine = state.engine.clone();
         let creq = CloneRequest {
             url: url.clone(),
@@ -2068,10 +2204,34 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
             depth: None,
         };
 
+        // 开始信息：目标 / 认证 / 出网（与同步对话框开头一致）
+        emit_log("dim", format!("git clone {url}"));
+        emit_log(
+            "dim",
+            if zh {
+                format!("目标目录: {}", dest.display())
+            } else {
+                format!("Destination: {}", dest.display())
+            },
+        );
+        emit_log("info", auth_note(explicit.as_ref(), zh));
+        emit_log(
+            "info",
+            egress_note(&url, proxy_in_use(&state).as_deref(), zh),
+        );
+
         let mut result = engine.clone_repo(&creq, explicit.as_ref(), &progress, &cancel);
         if explicit.is_none() {
             if let Err(e) = &result {
                 match retry_with_stored(&None, e, |c| {
+                    emit_log(
+                        "info",
+                        if zh {
+                            "使用记住的凭证重试…".to_string()
+                        } else {
+                            "Retrying with stored credentials…".to_string()
+                        },
+                    );
                     engine.clone_repo(&creq, c, &progress, &cancel).map(|_| ())
                 }) {
                     Ok(()) => {
@@ -2085,6 +2245,36 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
         if remember {
             if let Some(creds) = &explicit {
                 store_creds_for(&url, creds);
+            }
+        }
+        let elapsed = started.elapsed().as_millis();
+        match &result {
+            Ok(_) => emit_log(
+                "ok",
+                if zh {
+                    format!("成功（耗时 {elapsed} ms）")
+                } else {
+                    format!("Success ({elapsed} ms)")
+                },
+            ),
+            Err(e) if e.code == ErrorCode::Cancelled => emit_log(
+                "warn",
+                if zh {
+                    format!("已取消（{elapsed} ms）")
+                } else {
+                    format!("Cancelled ({elapsed} ms)")
+                },
+            ),
+            Err(e) => {
+                let raw = e.raw.clone().unwrap_or_default();
+                emit_log(
+                    "error",
+                    if zh {
+                        format!("失败（{elapsed} ms）：{raw}")
+                    } else {
+                        format!("Failed ({elapsed} ms): {raw}")
+                    },
+                );
             }
         }
         let (ok, error) = match &result {
@@ -2470,4 +2660,90 @@ pub async fn export_diagnostics(app: AppHandle) -> CmdResult<String> {
         Ok(abs_string(&path))
     })
     .await
+}
+
+#[cfg(test)]
+mod net_note_tests {
+    use super::{auth_note, egress_note, stage_note};
+    use higit_git::engine::Credentials;
+
+    #[test]
+    fn egress_https_direct_when_proxy_off() {
+        let zh = egress_note(
+            "https://github.com/hicode0101/HiGit.git",
+            None,
+            true,
+        );
+        assert!(zh.contains("直连"), "zh: {zh}");
+        assert!(zh.contains("http.proxy"), "zh 应提示 git 配置不参与: {zh}");
+        let en = egress_note(
+            "https://github.com/hicode0101/HiGit.git",
+            None,
+            false,
+        );
+        assert!(en.contains("direct"), "en: {en}");
+    }
+
+    #[test]
+    fn egress_https_via_proxy_when_enabled() {
+        let zh = egress_note("https://github.com/x/y.git", Some("socks5://127.0.0.1:1080"), true);
+        assert!(zh.contains("走代理"), "zh: {zh}");
+        assert!(zh.contains("socks5://127.0.0.1:1080"), "zh: {zh}");
+        let en = egress_note("https://github.com/x/y.git", Some("http://127.0.0.1:7891"), false);
+        assert!(en.contains("proxy http://127.0.0.1:7891"), "en: {en}");
+    }
+
+    #[test]
+    fn egress_ssh_is_direct() {
+        let zh = egress_note("git@github.com:hicode0101/test1.git", Some("http://127.0.0.1:7891"), true);
+        assert!(zh.contains("直连"), "SSH 代理设置不生效，应为直连: {zh}");
+        let en = egress_note("ssh://git@github.com/x/y.git", None, false);
+        assert!(en.contains("direct"), "en: {en}");
+    }
+
+    #[test]
+    fn egress_local_path_has_no_network() {
+        let zh = egress_note("D:/Code/some-repo", None, true);
+        assert!(zh.contains("本地路径"), "zh: {zh}");
+        let en = egress_note("file:///D:/Code/some-repo", None, false);
+        assert!(en.contains("local path"), "en: {en}");
+    }
+
+    #[test]
+    fn auth_note_matches_credential_chain() {
+        let ssh = Credentials::SshKey {
+            username: "git".to_string(),
+            key_path: "D:/keys/id_ed25519".to_string(),
+            passphrase: String::new(),
+            from_store: false,
+        };
+        assert!(auth_note(Some(&ssh), true).contains("SSH 密钥 D:/keys/id_ed25519"));
+        let agent = Credentials::SshKey {
+            username: "git".to_string(),
+            key_path: String::new(),
+            passphrase: String::new(),
+            from_store: false,
+        };
+        assert!(auth_note(Some(&agent), true).contains("ssh-agent"));
+        assert!(auth_note(Some(&agent), false).contains("ssh-agent"));
+        let http = Credentials::UserPass {
+            username: "hicode0101".to_string(),
+            password: "secret".to_string(),
+        };
+        let line = auth_note(Some(&http), true);
+        assert!(line.contains("HTTPS") && line.contains("hicode0101"), "{line}");
+        // 日志不得包含密码
+        assert!(!line.contains("secret"));
+        assert!(auth_note(None, true).contains("默认"));
+        assert!(auth_note(None, false).contains("default"));
+    }
+
+    #[test]
+    fn stage_note_maps_known_stages() {
+        assert_eq!(stage_note("Receiving objects", true), "正在接收对象…");
+        assert_eq!(stage_note("Resolving deltas", false), "Resolving deltas…");
+        assert_eq!(stage_note("Packing objects", true), "正在打包对象…");
+        assert_eq!(stage_note("Pushing objects", true), "正在推送对象…");
+        assert_eq!(stage_note("Other stage", true), "Other stage");
+    }
 }

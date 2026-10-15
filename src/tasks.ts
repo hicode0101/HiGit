@@ -53,23 +53,14 @@ function handleJobDone(e: JobDoneEvent) {
 }
 
 function handleCloneDone(e: JobDoneEvent) {
+  // 克隆对话框发起的任务：日志 / 结果由对话框展示，这里不再弹全局错误框
+  if (cloneDoneHandler && e.jobId === cloneDoneJobId) {
+    cloneDoneHandler(e);
+    return;
+  }
   const onCreds = cloneCredsCallback;
   if (e.ok) {
-    store.ui.clone = false;
-    const path = e.repoPath;
-    if (path) {
-      void (async () => {
-        const { openRepo } = await import("./store");
-        try {
-          await api.addLocalRepo(path); // 登记进仓库列表（openRepo 不会写入 config）
-        } catch {
-          /* 已登记或校验失败不阻断打开 */
-        }
-        await openRepo(path);
-        toast(t("Clone Repository") + " ✓");
-        cloneSuccessCallback?.(path);
-      })();
-    }
+    finalizeCloneSuccess(e.repoPath);
   } else if (e.error) {
     if (e.error.code === "auth-failed" && e.error.auth) {
       // 凭证对话框（FR-1.2 / FR-5.5）；提交后回调重新发起克隆
@@ -87,6 +78,37 @@ function handleCloneDone(e: JobDoneEvent) {
       toast(t("Operation cancelled"));
     }
   }
+}
+
+/** 克隆成功收尾：关对话框、登记进仓库列表并打开（对话框 / 兜底路径共用） */
+export function finalizeCloneSuccess(repoPath?: string | null) {
+  store.ui.clone = false;
+  const path = repoPath;
+  if (!path) return;
+  void (async () => {
+    const { openRepo } = await import("./store");
+    try {
+      await api.addLocalRepo(path); // 登记进仓库列表（openRepo 不会写入 config）
+    } catch {
+      /* 已登记或校验失败不阻断打开 */
+    }
+    await openRepo(path);
+    toast(t("Clone Repository") + " ✓");
+    cloneSuccessCallback?.(path);
+  })();
+}
+
+let cloneDoneJobId = 0;
+let cloneDoneHandler: ((e: JobDoneEvent) => void) | null = null;
+
+/** 克隆对话框注册 job-done 处理（进度 / 日志 / 结果在对话框内展示）；传 null 注销 */
+export function registerCloneDone(cb: ((e: JobDoneEvent) => void) | null) {
+  cloneDoneHandler = cb;
+}
+
+/** 克隆对话框发起克隆后绑定 job_id（job-done 分流到对话框） */
+export function bindCloneDialogJob(jobId: number) {
+  cloneDoneJobId = jobId;
 }
 
 let cloneCredsCallback: ((creds: { kind: "http" | "ssh"; username: string; password?: string; keyPath?: string; passphrase?: string }, remember: boolean) => void) | null = null;

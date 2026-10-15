@@ -1,10 +1,18 @@
 <script setup lang="ts">
-/** 克隆仓库对话框（图3 / FR-1.2）：仓库信息 / 认证 / Git 身份 三个标签页 + 实时进度 + 取消 */
-import { computed, onUnmounted, ref } from "vue";
+/** 克隆仓库对话框（图3 / FR-1.2）：仓库信息 / 认证 / Git 身份 三个标签页；
+ * 开始后切换到进度 + 详细日志页（目标 / 认证 / 出网 / 阶段 / 结果，与同步对话框一致）+ 取消 */
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { store, showError, refreshRepos } from "../store";
-import { api } from "../api";
+import { api, onJobProgress, onSyncLog } from "../api";
+import type { JobDoneEvent } from "../api/types";
 import { t } from "../i18n";
-import { registerCloneCreds, registerCloneSuccess } from "../tasks";
+import {
+  bindCloneDialogJob,
+  finalizeCloneSuccess,
+  registerCloneCreds,
+  registerCloneDone,
+  registerCloneSuccess,
+} from "../tasks";
 import { detectAuthFromUrl } from "../urlAuth";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
@@ -12,14 +20,17 @@ import { joinNative } from "../path";
 
 const emit = defineEmits<{ close: [] }>();
 
+// 阶段：setup 配置 → running 执行中 → done 结束（日志保留可关闭）
 const tab = ref<0 | 1 | 2>(0);
 const url = ref("");
 const dest = ref("");
-const busy = ref(false);
+const phase = ref<"setup" | "running" | "done">("setup");
 const jobId = ref<number | null>(null);
 const percent = ref(0);
 const stage = ref("");
 const cancelled = ref(false);
+const logs = ref<{ level: string; text: string }[]>([]);
+const logBox = ref<HTMLElement | null>(null);
 
 // 认证页：HTTPS / SSH 单选，作用于本次克隆与之后该仓库的同步（FR-5）
 const authKind = ref<"http" | "ssh">("http");
@@ -45,7 +56,9 @@ const destPath = computed(() => {
   return joinNative(dest.value, repoNameFromUrl.value);
 });
 
-const canClone = computed(() => url.value.trim() && dest.value.trim() && !busy.value);
+const canClone = computed(
+  () => phase.value === "setup" && !!url.value.trim() && !!dest.value.trim(),
+);
 
 async function chooseDir() {
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -89,7 +102,8 @@ async function clone(credsOverride?: {
     /* 后端兜底 */
   }
   cancelled.value = false;
-  busy.value = true;
+  phase.value = "running";
+  logs.value = [];
   percent.value = 0;
   stage.value = t("Cloning…");
   try {
@@ -108,8 +122,9 @@ async function clone(credsOverride?: {
       remember: rememberCred.value,
     });
     jobId.value = jid;
+    bindCloneDialogJob(jid);
   } catch (e) {
-    busy.value = false;
+    phase.value = "done";
     showError(e as Error);
   }
 }
@@ -120,15 +135,39 @@ registerCloneCreds((creds) => {
   void clone(creds);
 });
 
+// 克隆完成（结果在日志区展示）：成功 → 收尾打开仓库；认证失败 → 凭证框原地重试；
+// 其他失败 → 对话框保留，失败行已在日志区
+registerCloneDone((e: JobDoneEvent) => {
+  if (e.jobId !== jobId.value) return;
+  phase.value = "done";
+  if (e.ok) {
+    percent.value = 100;
+    void finalizeCloneSuccess(e.repoPath);
+    return;
+  }
+  if (e.error?.code === "auth-failed" && e.error.auth) {
+    const auth = e.error.auth;
+    store.ui.credentials = {
+      kind: auth.kind,
+      host: auth.host,
+      username: auth.username,
+      retry: null,
+      onCreds: (creds) => {
+        store.ui.credentials = null;
+        void clone(creds);
+      },
+    };
+  }
+});
+
 async function cancel() {
   cancelled.value = true;
   if (jobId.value) await api.cancelJob(jobId.value).catch(() => undefined);
 }
 
-// 进度事件由 tasks.ts 统一监听；这里轮询 store.task 显示
-import { onMounted } from "vue";
-import { onJobProgress } from "../api";
+// 进度事件由 tasks.ts 统一监听；这里同步进度条与详细日志
 let unlisten: (() => void) | null = null;
+let unlistenLog: (() => void) | null = null;
 onMounted(async () => {
   // Git 身份默认取全局设置中的姓名 / 邮箱（仓库级设置优先于全局）
   try {
@@ -146,11 +185,23 @@ onMounted(async () => {
       percent.value = e.total > 0 ? Math.floor((e.done * 100) / e.total) : 0;
     }
   });
+  // 详细日志：与同步对话框同一事件源（sync-log），按 job_id 过滤
+  unlistenLog = await onSyncLog((e) => {
+    if (e.jobId !== jobId.value) return;
+    logs.value.push({ level: e.level, text: e.text });
+    void nextTick(() => {
+      if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
+    });
+  });
 });
-onUnmounted(() => unlisten?.());
+onUnmounted(() => {
+  unlisten?.();
+  unlistenLog?.();
+  registerCloneDone(null);
+});
 
 function close() {
-  if (busy.value) void cancel();
+  if (phase.value === "running") void cancel();
   emit("close");
 }
 
@@ -192,7 +243,7 @@ registerCloneSuccess(async (path) => {
       </button>
     </div>
 
-    <div v-show="tab === 0 && !busy">
+    <div v-show="tab === 0 && phase === 'setup'">
       <div class="form-row">
         <label>{{ t("Repository URL") }}</label>
         <input v-model="url" :placeholder="'https://github.com/user/repo.git'" @input="onUrlInput" />
@@ -209,7 +260,7 @@ registerCloneSuccess(async (path) => {
       </div>
     </div>
 
-    <div v-show="tab === 1 && !busy">
+    <div v-show="tab === 1 && phase === 'setup'">
       <div class="form-row">
         <div class="kind-row">
           <label class="check-line"><input v-model="authKind" type="radio" value="http" /> HTTPS</label>
@@ -244,7 +295,7 @@ registerCloneSuccess(async (path) => {
       </template>
     </div>
 
-    <div v-show="tab === 2 && !busy">
+    <div v-show="tab === 2 && phase === 'setup'">
       <div class="identity-grid">
         <div class="form-row">
           <label>{{ t("Your Name") }}</label>
@@ -260,16 +311,31 @@ registerCloneSuccess(async (path) => {
       </div>
     </div>
 
-    <div v-if="busy" class="progress-area">
+    <!-- 执行中 / 结束：进度条 + 详细日志（与同步对话框一致，TortoiseGit 风格） -->
+    <div v-if="phase !== 'setup'" class="progress-area">
       <div class="progress-title">{{ stage || t("Cloning…") }}</div>
       <div class="bar">
-        <div class="bar-fill" :style="{ width: percent + '%' }" />
+        <div
+          class="bar-fill"
+          :class="{ done: phase === 'done' && percent === 100 }"
+          :style="{ width: percent + '%' }"
+        />
       </div>
-      <div v-if="cancelled" class="cancel-hint">{{ t("Cancelling…") }}</div>
+      <div ref="logBox" class="log-box">
+        <div v-for="(l, i) in logs" :key="i" class="log-line" :class="l.level">{{ l.text }}</div>
+      </div>
+      <div v-if="cancelled && phase === 'running'" class="cancel-hint">
+        {{ t("Cancelling…") }}
+      </div>
     </div>
 
     <template #footer>
-      <button v-if="busy" class="btn" @click="cancel">{{ t("Cancel") }}</button>
+      <template v-if="phase === 'running'">
+        <button class="btn" @click="cancel">{{ t("Cancel") }}</button>
+      </template>
+      <template v-else-if="phase === 'done'">
+        <button class="btn primary" @click="close">{{ t("Close") }}</button>
+      </template>
       <template v-else>
         <button class="btn" @click="close">{{ t("Cancel") }}</button>
         <button class="btn primary" :disabled="!canClone" @click="clone()">
@@ -359,9 +425,56 @@ registerCloneSuccess(async (path) => {
   transition: width 0.2s;
 }
 
+.bar-fill.done {
+  background: var(--status-added, #2da44e);
+}
+
 .cancel-hint {
   margin-top: 8px;
   color: var(--status-modified);
   font-size: 12px;
+}
+
+.log-box {
+  height: 260px;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  /* 覆盖全局 user-select:none：日志文本可选取复制 */
+  user-select: text;
+  cursor: text;
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-secondary);
+}
+
+.log-line.dim {
+  color: var(--text-tertiary);
+}
+
+.log-line.remote {
+  color: var(--accent);
+}
+
+.log-line.ok {
+  color: var(--status-added, #2da44e);
+  font-weight: 600;
+}
+
+.log-line.warn {
+  color: var(--status-modified);
+}
+
+.log-line.error {
+  color: var(--status-deleted);
+  font-weight: 600;
 }
 </style>
