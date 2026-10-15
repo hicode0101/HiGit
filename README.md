@@ -151,3 +151,4 @@ HiGit/
 - 错误模型 `HigitError { code, params, raw }` 结构化上抛，前端按错误码 i18n 渲染、原文可复制；
 - 凭证优先级：会话内存 → 系统凭证管理器（"记住"勾选）→ 凭证对话框；
 - 配置存储于系统标准配置目录（Windows `%APPDATA%\HiGit\config.json`），损坏时自动回退默认设置。
+
