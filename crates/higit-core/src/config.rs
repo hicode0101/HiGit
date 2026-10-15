@@ -87,7 +87,9 @@ pub struct AppConfig {
     pub git_backend: String,
     /// 网络代理开关（FR-10.4）：false = 直连，true = 使用 proxy 字段
     pub proxy_enabled: bool,
-    /// 网络代理 URL（FR-10.4）：仅在 proxy_enabled 开启时生效；如 socks5://127.0.0.1:1080
+    /// 网络代理 URL（FR-10.4）：仅在 proxy_enabled 开启时生效；引擎只对 HTTP 代理
+    /// 稳定可用（socks 经 Windows WinHTTP / libgit2 处理，实测与常见代理软件不兼容），
+    /// 默认预填代理软件常见的 HTTP 入口
     pub proxy: String,
 }
 
@@ -102,7 +104,7 @@ impl Default for AppConfig {
             show_ignored: false,
             git_backend: "git2".to_string(),
             proxy_enabled: false,
-            proxy: "socks5://127.0.0.1:1080".to_string(),
+            proxy: "http://127.0.0.1:7890".to_string(),
         }
     }
 }
@@ -243,7 +245,7 @@ mod tests {
         assert_eq!(cfg.language, "");
         assert_eq!(cfg.theme, "light");
         assert!(!cfg.proxy_enabled);
-        assert_eq!(cfg.proxy, "socks5://127.0.0.1:1080");
+        assert_eq!(cfg.proxy, "http://127.0.0.1:7890");
     }
 
     #[test]

@@ -1704,6 +1704,23 @@ fn proxy_in_use(state: &AppState) -> Option<String> {
     (cfg.proxy_enabled && !cfg.proxy.trim().is_empty()).then(|| cfg.proxy.trim().to_string())
 }
 
+/// SOCKS 代理警示（仅 socks*:// 地址返回 Some）。实测依据：Windows 上代理经系统
+/// WinHTTP 处理，`socks5://` 地址与常见代理软件的 SOCKS 服务不兼容（稳定握手超时，
+/// 见 examples/proxy_probe.rs）；libgit2 自带客户端（非 Windows）也没有 SOCKS 实现。
+/// 引擎真正稳定可用的是代理软件的 HTTP 入口。
+fn socks_proxy_hint(proxy: Option<&str>, zh: bool) -> Option<String> {
+    let p = proxy?;
+    if !p.trim().to_ascii_lowercase().starts_with("socks") {
+        return None;
+    }
+    Some(if zh {
+        "注意: SOCKS 代理与当前引擎兼容性差（常表现为超时），建议改用代理软件的 HTTP 代理入口（http://…）"
+            .to_string()
+    } else {
+        "Note: SOCKS proxies are unreliable with this engine (often timeouts); prefer an HTTP proxy address (http://...)".to_string()
+    })
+}
+
 /// 同步长任务（推送 / 拉取 / 抓取对话框）：与 sync 命令同链路（keyring 重试 / 取消），
 /// 额外产出详细日志（目标地址 / 认证方式 / 待传输内容 / 远端输出 / 逐分支结果）。
 #[tauri::command]
@@ -1814,10 +1831,14 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                 None => None,
             }
         };
+        let proxy_cfg = proxy_in_use(&state);
         emit_log(
             "info",
-            egress_note(remote_url.as_deref().unwrap_or(""), proxy_in_use(&state).as_deref(), zh),
+            egress_note(remote_url.as_deref().unwrap_or(""), proxy_cfg.as_deref(), zh),
         );
+        if let Some(h) = socks_proxy_hint(proxy_cfg.as_deref(), zh) {
+            emit_log("warn", h);
+        }
         emit_log("info", auth_note(used.as_ref(), zh));
 
         // 各操作的预览日志
@@ -2205,10 +2226,14 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
                 format!("Destination: {}", dest.display())
             },
         );
+        let proxy_cfg = proxy_in_use(&state);
         emit_log(
             "info",
-            egress_note(&url, proxy_in_use(&state).as_deref(), zh),
+            egress_note(&url, proxy_cfg.as_deref(), zh),
         );
+        if let Some(h) = socks_proxy_hint(proxy_cfg.as_deref(), zh) {
+            emit_log("warn", h);
+        }
         emit_log("info", auth_note(explicit.as_ref(), zh));
 
         let mut result = engine.clone_repo(&creq, explicit.as_ref(), &progress, &cancel);
@@ -2655,7 +2680,7 @@ pub async fn export_diagnostics(app: AppHandle) -> CmdResult<String> {
 
 #[cfg(test)]
 mod net_note_tests {
-    use super::{auth_note, egress_note, stage_note};
+    use super::{auth_note, egress_note, socks_proxy_hint, stage_note};
     use higit_git::engine::Credentials;
 
     #[test]
@@ -2735,5 +2760,16 @@ mod net_note_tests {
         assert_eq!(stage_note("Packing objects", true), "正在打包对象…");
         assert_eq!(stage_note("Pushing objects", true), "正在推送对象…");
         assert_eq!(stage_note("Other stage", true), "Other stage");
+    }
+
+    #[test]
+    fn socks_proxy_hint_only_for_socks_urls() {
+        assert!(socks_proxy_hint(Some("socks5://127.0.0.1:10808"), true).is_some());
+        assert!(socks_proxy_hint(Some("SOCKS5://127.0.0.1:10808"), true).is_some());
+        assert!(socks_proxy_hint(Some("socks5h://x:1"), false).is_some());
+        assert!(socks_proxy_hint(Some("http://127.0.0.1:7891"), true).is_none());
+        assert!(socks_proxy_hint(None, true).is_none());
+        let zh = socks_proxy_hint(Some("socks5://127.0.0.1:10808"), true).unwrap();
+        assert!(zh.contains("HTTP"), "{zh}");
     }
 }

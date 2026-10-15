@@ -323,7 +323,9 @@ pub trait GitEngine: Send + Sync {
         Err(HigitError::not_implemented("pull_verbose"))
     }
 
-    /// 设置网络代理（FR-10.4）：`None`/空串 = 直连；支持 `http(s)://`、`socks5://` 等 URL。
+    /// 设置网络代理（FR-10.4）：`None`/空串 = 直连；URL 原样交给 libgit2——Windows 上
+    /// 经系统 WinHTTP 处理（`socks*://` 与常见代理软件不兼容，仅 HTTP 代理稳定可用），
+    /// 非 Windows 的 libgit2 自带客户端无 SOCKS 实现。建议一律使用 `http(s)://` 代理地址。
     /// 会话无关，作用于其后的 clone / fetch / push / pull。
     fn set_proxy(&self, _proxy: Option<&str>) {}
 

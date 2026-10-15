@@ -235,6 +235,8 @@ export const zhCN: Record<string, string> = {
   "Proxy URL": "代理地址",
   "Enable proxy": "启用代理",
   "Applied to clone / fetch / push / pull when enabled.": "开启后作用于克隆 / 抓取 / 推送 / 拉取",
+  "SOCKS proxies are unreliable with the built-in engine (often timeouts). Prefer an HTTP proxy address, e.g. http://127.0.0.1:7890.":
+    "SOCKS 代理与内置引擎兼容性差（常表现为超时），建议填 HTTP 代理地址，如 http://127.0.0.1:7890",
   "Name and email are required": "Git 身份的姓名和邮箱为必填项",
   "Invalid email format": "邮箱格式不正确",
   "Show in Explorer": "在资源管理器中显示",

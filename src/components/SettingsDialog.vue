@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 设置对话框（FR-10）：语言 / 主题 / 开关 / Git 身份 / 网络代理 */
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { store, persistConfig, showError, toast } from "../store";
 import { api } from "../api";
 import { t } from "../i18n";
@@ -8,10 +8,17 @@ import DialogBase from "./DialogBase.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
-/** 开启代理时的默认地址 */
-const DEFAULT_PROXY = "socks5://127.0.0.1:1080";
+/** 开启代理时的默认地址（引擎只对 HTTP 代理稳定可用，socks 不建议） */
+const DEFAULT_PROXY = "http://127.0.0.1:7890";
 /** 邮箱格式：非空白@非空白.非空白（宽松校验，避免误拒合法地址） */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** 填的是 SOCKS 地址时给出警示：引擎经系统组件处理 socks，实测与常见代理软件不兼容 */
+const socksHint = computed(
+  () =>
+    !!store.config?.proxyEnabled &&
+    store.config.proxy.trim().toLowerCase().startsWith("socks"),
+);
 
 const globalIdentity = ref<{ name: string; email: string }>({ name: "", email: "" });
 
@@ -97,9 +104,12 @@ async function save() {
         <input
           v-model="store.config!.proxy"
           :disabled="!store.config!.proxyEnabled"
-          placeholder="socks5://127.0.0.1:1080"
+          placeholder="http://127.0.0.1:7890"
         />
         <span class="hint">{{ t("Applied to clone / fetch / push / pull when enabled.") }}</span>
+        <span v-if="socksHint" class="hint warn-hint">
+          {{ t("SOCKS proxies are unreliable with the built-in engine (often timeouts). Prefer an HTTP proxy address, e.g. http://127.0.0.1:7890.") }}
+        </span>
       </div>
     </div>
 
@@ -163,5 +173,9 @@ async function save() {
 .hint {
   font-size: 11px;
   color: var(--text-tertiary);
+}
+
+.warn-hint {
+  color: var(--status-modified);
 }
 </style>
