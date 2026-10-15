@@ -1,10 +1,10 @@
 <script setup lang="ts">
-/** 文件列表（图1）：名称(类型图标) / Git 状态 / 大小 / 修改时间 + 行内右键菜单（暂存 / 差异 / 丢弃） */
+/** 文件列表（图1）：名称(类型图标) / Git 状态 / 大小 / 修改时间 + 行内右键菜单（拉取/推送/提交/对比/撤销/分支操作） */
 import { computed } from "vue";
 import { store, navigate } from "../store";
-import { stagePaths, unstagePaths, discardPaths } from "../tasks";
 import { t, formatDateTime, formatSize } from "../i18n";
 import { showContextMenu } from "../ctxmenu";
+import { rowMenu } from "../workmenu";
 import type { FileRowDto } from "../api/types";
 import IconGlyph from "./IconGlyph.vue";
 
@@ -42,32 +42,8 @@ async function onRowActivate(row: FileRowDto) {
   }
 }
 
-function rowMenu(row: FileRowDto) {
-  const items = [] as Array<Record<string, unknown>>;
-  const changeable = row.kind !== "clean" && row.kind !== "ignored";
-  if (row.kind === "staged") {
-    items.push({ label: t("Unstage"), icon: "minus", action: () => void unstagePaths([row.relPath]) });
-  } else if (changeable) {
-    items.push({ label: t("Stage"), icon: "plus", action: () => void stagePaths([row.relPath]) });
-  }
-  if (!row.isDir) {
-    items.push({
-      label: t("View Diff"),
-      icon: "edit",
-      disabled: row.kind === "clean" || row.kind === "ignored",
-      action: () => emit("openDiff", row),
-    });
-  }
-  if (changeable) {
-    items.push({ separator: true });
-    items.push({
-      label: t("Discard Changes…"),
-      icon: "restore",
-      danger: true,
-      action: () => void discardPaths([row.relPath]),
-    });
-  }
-  return items;
+function onRowContextmenu(e: MouseEvent, row: FileRowDto) {
+  showContextMenu(e, rowMenu(row, (r) => emit("openDiff", r)));
 }
 
 function fileIcon(row: FileRowDto): string {
@@ -97,7 +73,7 @@ function fileIcon(row: FileRowDto): string {
         class="table-row"
         :class="{ dir: row.isDir, ignored: row.kind === 'ignored' }"
         @dblclick="onRowActivate(row)"
-        @contextmenu.prevent="showContextMenu($event, rowMenu(row))"
+        @contextmenu.prevent="onRowContextmenu($event, row)"
       >
         <div class="col-name">
           <IconGlyph :name="fileIcon(row)" :size="17" class="file-icon" :class="{ dirIcon: row.isDir }" />

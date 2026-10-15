@@ -55,6 +55,10 @@ export interface UiState {
   syncDialog: SyncKind | null;
   /** 提交对话框（FR-4 扩展） */
   commitDialog: boolean;
+  /** 撤销修改对话框（工作区右键）：target = 目录（isFile=false，空白区为当前浏览目录）或文件 */
+  discard: { target: string; isFile: boolean } | null;
+  /** 分支操作对话框（工作区右键）：switch = 切换分支；merge = 合并分支 */
+  branchOp: "switch" | "merge" | null;
   legend: boolean;
   about: boolean;
   shortcuts: boolean;
@@ -111,6 +115,8 @@ export const store = reactive({
     repoSettingsId: null,
     syncDialog: null,
     commitDialog: false,
+    discard: null,
+    branchOp: null,
     legend: false,
     about: false,
     shortcuts: false,

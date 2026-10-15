@@ -1,7 +1,10 @@
 <script setup lang="ts">
-/** 主内容区（图1）：变更 / 历史 双标签 + 面包屑 + 文件列表（提交走工具栏对话框） */
+/** 主内容区（图1）：变更 / 历史 双标签 + 面包屑 + 文件列表（提交走工具栏对话框）；
+ * 空白区右键弹出工作区菜单（行内右键在 FileTable 内已 stopPropagation，不会冒泡到这里） */
 import { store } from "../store";
 import { t } from "../i18n";
+import { showContextMenu } from "../ctxmenu";
+import { blankMenu } from "../workmenu";
 import Breadcrumb from "./Breadcrumb.vue";
 import FileTable from "./FileTable.vue";
 import HistoryView from "./HistoryView.vue";
@@ -11,10 +14,14 @@ const emit = defineEmits<{
   openDiff: [row: { relPath: string; kind: string }];
   openCommitDiff: [oid: string, path: string];
 }>();
+
+function onBlankContextmenu(e: MouseEvent) {
+  if (store.repoOpen) showContextMenu(e, blankMenu());
+}
 </script>
 
 <template>
-  <div class="work-area">
+  <div class="work-area" @contextmenu.prevent="onBlankContextmenu">
     <template v-if="store.repoOpen">
       <div class="tabs">
         <button class="tab" :class="{ active: store.tab === 'changes' }" @click="store.tab = 'changes'">

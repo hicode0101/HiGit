@@ -9,7 +9,6 @@ import {
   refreshFiles,
   refreshRepos,
   refreshIdentity,
-  showConfirm,
   errorCodeKey,
   type SyncKind,
 } from "./store";
@@ -335,22 +334,11 @@ export function stagedRelPaths(): string[] {
   return store.status.entries.filter((e) => e.kind === "staged").map((e) => e.path);
 }
 
-/** 丢弃更改（FR-3.4 二次确认） */
-export async function discardPaths(paths: string[]) {
-  if (paths.length === 0) return;
-  const ok = await showConfirm({
-    title: t("Discard Changes…"),
-    message:
-      paths.length === 1
-        ? t("Discard this change? Uncommitted modifications will be lost permanently.")
-        : t("Discard these changes? {count} files' uncommitted modifications will be lost permanently.", {
-            count: paths.length,
-          }),
-    confirmLabel: t("Discard Changes…"),
-    danger: true,
-  });
-  if (!ok) return;
+/** 丢弃更改：撤销修改对话框已含风险提示与勾选确认，此处直接执行（git restore 语义） */
+export async function discardPaths(paths: string[]): Promise<boolean> {
+  if (paths.length === 0) return false;
   await applyStatusUpdate(api.discardPaths(paths));
+  return true;
 }
 
 // ---------- 提交（FR-4） ----------

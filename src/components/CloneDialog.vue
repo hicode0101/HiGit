@@ -252,7 +252,7 @@ registerCloneSuccess(async (path) => {
       <div class="form-row">
         <label>{{ t("Destination directory") }}</label>
         <div class="form-inline">
-          <input v-model="dest" :placeholder="'D:\\Code'" />
+          <input v-model="dest" :placeholder="t('Choose a path or enter one manually')" />
           <button class="btn" @click="chooseDir">{{ t("Choose…") }}</button>
         </div>
       </div>

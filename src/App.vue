@@ -27,6 +27,8 @@ import NewRepoDialog from "./components/NewRepoDialog.vue";
 import CloneDialog from "./components/CloneDialog.vue";
 import SyncDialog from "./components/SyncDialog.vue";
 import CommitDialog from "./components/CommitDialog.vue";
+import DiscardDialog from "./components/DiscardDialog.vue";
+import BranchPickerDialog from "./components/BranchPickerDialog.vue";
 import BranchesDialog from "./components/BranchesDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import RepoSettingsDialog from "./components/RepoSettingsDialog.vue";
@@ -114,6 +116,8 @@ function onKeydown(e: KeyboardEvent) {
     else if (store.ui.progress) void cancelCurrentJob();
     else if (store.ui.syncDialog) window.dispatchEvent(new CustomEvent("higit:sync-esc"));
     else if (store.ui.commitDialog) store.ui.commitDialog = false;
+    else if (store.ui.discard) store.ui.discard = null;
+    else if (store.ui.branchOp) store.ui.branchOp = null;
     else if (store.ui.clone) store.ui.clone = false;
     else if (store.ui.newRepo) store.ui.newRepo = false;
     else if (store.ui.branches) store.ui.branches = false;
@@ -181,6 +185,8 @@ function suppressNativeContextMenu(e: MouseEvent) {
     <CloneDialog v-if="store.ui.clone" @close="store.ui.clone = false" />
     <SyncDialog v-if="store.ui.syncDialog" @close="store.ui.syncDialog = null" />
     <CommitDialog v-if="store.ui.commitDialog" @close="store.ui.commitDialog = false" />
+    <DiscardDialog v-if="store.ui.discard" @close="store.ui.discard = null" />
+    <BranchPickerDialog v-if="store.ui.branchOp" @close="store.ui.branchOp = null" />
     <BranchesDialog v-if="store.ui.branches" @close="store.ui.branches = false" />
     <SettingsDialog v-if="store.ui.settings" @close="store.ui.settings = false" />
     <RepoSettingsDialog

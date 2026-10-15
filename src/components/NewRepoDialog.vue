@@ -62,7 +62,7 @@ async function create() {
     <div class="form-row">
       <label>{{ t("Parent directory") }}</label>
       <div class="form-inline">
-        <input v-model="parentDir" :placeholder="'D:\\Code'" />
+        <input v-model="parentDir" :placeholder="t('Choose a path or enter one manually')" />
         <button class="btn" @click="chooseDir">{{ t("Choose…") }}</button>
       </div>
     </div>
