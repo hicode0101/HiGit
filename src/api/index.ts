@@ -150,6 +150,51 @@ export function onJobDone(cb: (e: JobDoneEvent) => void): Promise<UnlistenFn> {
   return listen<JobDoneEvent>("job-done", (ev) => cb(ev.payload));
 }
 
-export function onSyncLog(cb: (e: SyncLogEvent) => void): Promise<UnlistenFn> {
-  return listen<SyncLogEvent>("sync-log", (ev) => cb(ev.payload));
+// ---------- sync-log 事件总线（含早到缓冲回放） ----------
+// 后端任务线程在 invoke 返回前就会发出首批日志（认证方式 / 出网方式 / 分支预览等），
+// 前端此时还不知道 jobId，直接按 jobId 过滤会把这些行丢掉（表现为日志时有时无）。
+// 因此这里统一接事件：先缓存，订阅者照常实时收到；发起方拿到 jobId 后调用
+// replaySyncLogs 把该任务早到的日志按原顺序补发给订阅者（每个 jobId 至多回放一次）。
+
+let syncLogSubs: ((e: SyncLogEvent) => void)[] = [];
+let syncLogBuffer: SyncLogEvent[] = [];
+const syncLogReplayed = new Set<number>();
+let syncLogRawReady = false;
+
+async function ensureSyncLogRaw(): Promise<void> {
+  if (syncLogRawReady) return;
+  syncLogRawReady = true;
+  await listen<SyncLogEvent>("sync-log", (ev) => {
+    const e = ev.payload;
+    if (!syncLogReplayed.has(e.jobId)) {
+      syncLogBuffer.push(e);
+      if (syncLogBuffer.length > 200) syncLogBuffer.shift();
+    }
+    for (const cb of [...syncLogSubs]) cb(e);
+  });
+}
+
+export async function onSyncLog(cb: (e: SyncLogEvent) => void): Promise<UnlistenFn> {
+  await ensureSyncLogRaw();
+  syncLogSubs.push(cb);
+  return () => {
+    syncLogSubs = syncLogSubs.filter((x) => x !== cb);
+  };
+}
+
+/** 拿到 jobId 后调用：把早于该时刻到达的任务日志按原顺序补发（每 jobId 至多一次） */
+export function replaySyncLogs(jobId: number): void {
+  if (syncLogReplayed.has(jobId)) return;
+  // 只记最近 50 个已回放的 jobId，防止长会话下集合无限增长
+  syncLogReplayed.add(jobId);
+  if (syncLogReplayed.size > 50) {
+    const keep = [...syncLogReplayed].slice(-50);
+    syncLogReplayed.clear();
+    keep.forEach((id) => syncLogReplayed.add(id));
+  }
+  const early = syncLogBuffer.filter((e) => e.jobId === jobId);
+  syncLogBuffer = syncLogBuffer.filter((e) => e.jobId !== jobId);
+  for (const e of early) {
+    for (const cb of [...syncLogSubs]) cb(e);
+  }
 }

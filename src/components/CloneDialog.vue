@@ -3,7 +3,7 @@
  * 开始后切换到进度 + 详细日志页（目标 / 认证 / 出网 / 阶段 / 结果，与同步对话框一致）+ 取消 */
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { store, showError, refreshRepos } from "../store";
-import { api, onJobProgress, onSyncLog } from "../api";
+import { api, onJobProgress, onSyncLog, replaySyncLogs } from "../api";
 import type { JobDoneEvent } from "../api/types";
 import { t } from "../i18n";
 import {
@@ -123,6 +123,7 @@ async function clone(credsOverride?: {
     });
     jobId.value = jid;
     bindCloneDialogJob(jid);
+    replaySyncLogs(jid); // 补发早于 jobId 注册到达的开头日志（目标/认证方式/出网方式等）
   } catch (e) {
     phase.value = "done";
     showError(e as Error);

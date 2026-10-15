@@ -4,7 +4,7 @@
  * 开始后切换到进度 + 详细日志页（目标地址 / 认证方式 / 待传输内容 / 远端输出 / 结果） */
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { store, type SyncKind, showError } from "../store";
-import { api, onJobProgress, onSyncLog } from "../api";
+import { api, onJobProgress, onSyncLog, replaySyncLogs } from "../api";
 import type { JobDoneEvent, SyncLogEvent, SyncPreviewDto, RepoEntryDto } from "../api/types";
 import { t } from "../i18n";
 import { registerSyncDone, startSyncJob, type SyncCreds, type SyncJobReq } from "../tasks";
@@ -234,6 +234,7 @@ async function retrySync(creds: SyncCreds) {
   stage.value = "";
   try {
     jobId.value = await startSyncJob({ ...lastPayload, creds, remember: false });
+    replaySyncLogs(jobId.value); // 补发早于 jobId 注册到达的开头日志（认证方式/出网方式等）
   } catch (e) {
     phase.value = "done";
     showError(e as Error);
@@ -308,6 +309,7 @@ async function doStart() {
   stage.value = kindTitle.value + "…";
   try {
     jobId.value = await startSyncJob({ ...payload, creds, remember: rememberCred.value });
+    replaySyncLogs(jobId.value); // 补发早于 jobId 注册到达的开头日志（认证方式/出网方式等）
   } catch (e) {
     phase.value = "done";
     showError(e as Error);

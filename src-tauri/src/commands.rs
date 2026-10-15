@@ -1801,8 +1801,6 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
             .clone()
             .or_else(|| ssh_creds_from_entry(&state, &repo_path))
             .or_else(|| http_creds_from_store(&state, &repo_path));
-        emit_log("info", auth_note(used.as_ref(), zh));
-
         // 出网方式（开始前输出）：直连 / 走代理（HiGit 网络代理设置，FR-10.4）
         let remote_url = {
             let guard = state.session.lock().unwrap();
@@ -1820,6 +1818,7 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
             "info",
             egress_note(remote_url.as_deref().unwrap_or(""), proxy_in_use(&state).as_deref(), zh),
         );
+        emit_log("info", auth_note(used.as_ref(), zh));
 
         // 各操作的预览日志
         match kind {
@@ -2196,7 +2195,7 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
             depth: None,
         };
 
-        // 开始信息：目标 / 认证 / 出网（与同步对话框开头一致）
+        // 开始信息：目标 / 出网 / 认证（与同步对话框开头一致）
         emit_log("dim", format!("git clone {url}"));
         emit_log(
             "dim",
@@ -2206,11 +2205,11 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
                 format!("Destination: {}", dest.display())
             },
         );
-        emit_log("info", auth_note(explicit.as_ref(), zh));
         emit_log(
             "info",
             egress_note(&url, proxy_in_use(&state).as_deref(), zh),
         );
+        emit_log("info", auth_note(explicit.as_ref(), zh));
 
         let mut result = engine.clone_repo(&creq, explicit.as_ref(), &progress, &cancel);
         if explicit.is_none() {
