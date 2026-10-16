@@ -235,6 +235,8 @@ export const zhCN: Record<string, string> = {
   "The following files have conflicts:": "以下文件存在冲突：",
   Unified: "统一视图",
   "Side by side": "并排视图",
+  Maximize: "最大化",
+  Restore: "还原",
   "Edit .gitignore": "编辑 .gitignore",
   ".gitignore template": ".gitignore 模板",
   "Working tree has uncommitted changes that conflict with this operation":

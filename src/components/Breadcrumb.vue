@@ -26,7 +26,7 @@ const repoId = computed(() => store.repos.find((r) => r.path === store.repoPath)
       :title="t('Repository Settings')"
       @click="store.ui.repoSettingsId = repoId"
     >
-      <IconGlyph name="repo-settings" :size="15" />
+      <IconGlyph name="settings" :size="16" />
     </button>
     <template v-for="(part, i) in crumbs" :key="i">
       <span class="crumb-sep"><IconGlyph name="chevronRight" :size="12" /></span>
@@ -106,7 +106,8 @@ const repoId = computed(() => store.repos.find((r) => r.path === store.repoPath)
 .repo-edit {
   border: none;
   background: none;
-  color: var(--text-tertiary);
+  /* 默认比正文深一档，避免齿轮太隐身；悬停转主题色 */
+  color: var(--text-secondary);
   cursor: pointer;
   width: 24px;
   height: 24px;

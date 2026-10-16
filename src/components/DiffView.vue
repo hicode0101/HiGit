@@ -124,7 +124,8 @@ const placeholder = computed(() => {
 </script>
 
 <template>
-  <DialogBase :title="title" :width="960" @close="emit('close')">
+  <!-- 关闭遮罩点击关闭：查看差异时误点对话框外不应丢失当前对比 -->
+  <DialogBase :title="title" :width="960" maximizable resizable :close-on-mask="false" @close="emit('close')">
     <div class="diff-toolbar">
       <template v-if="work">
         <button class="chip" :class="{ on: spec === 'workdir' }" @click="switchSpec('workdir')">
@@ -221,6 +222,13 @@ const placeholder = computed(() => {
   overflow: auto;
   max-height: 56vh;
   user-select: text;
+}
+
+/* 对话框被最大化或缩放（.dlg.sized）后，差异区撑满剩余高度、内部滚动 */
+.dlg.sized .diff-body {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
 }
 
 .dline {

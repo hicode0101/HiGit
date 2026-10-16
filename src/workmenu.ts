@@ -1,5 +1,6 @@
-/** 工作区右键菜单：空白区 / 目录 / 文件三种形态（拉取/推送/提交/对比/撤销/分支操作） */
-import { store } from "./store";
+/** 工作区右键菜单：空白区 / 目录 / 文件三种形态（拉取/推送/提交/对比/撤销/分支操作/打开目录） */
+import { store, showError } from "./store";
+import { api } from "./api";
 import { openCommitDialog, openSyncDialog } from "./tasks";
 import { t } from "./i18n";
 import type { CtxMenuItem } from "./ctxmenu";
@@ -23,6 +24,22 @@ export function openBranchOp(op: "switch" | "merge") {
   store.ui.branchOp = op;
 }
 
+/** 在系统文件管理器中打开当前面包屑导航到的目录（相对路径拼仓库根，根 = 仓库本身） */
+function openCurrentDir() {
+  // repoPath 是平台原生分隔符（Windows 反斜杠），统一成 / 后拼接，后端 to_path 会按平台还原
+  const root = store.repoPath.replace(/\\/g, "/");
+  const abs = store.currentDir ? `${root}/${store.currentDir}` : root;
+  void api.openInExplorer(abs).catch(showError);
+}
+
+/** 菜单尾部公共项：打开所在文件夹 */
+function explorerItems(): CtxMenuItem[] {
+  return [
+    { separator: true },
+    { label: t("Open Containing Folder"), icon: "folder", action: openCurrentDir },
+  ];
+}
+
 /** 空白区 / 背景菜单：撤销修改的目标为当前浏览目录 */
 export function blankMenu(): CtxMenuItem[] {
   return [
@@ -40,6 +57,7 @@ export function blankMenu(): CtxMenuItem[] {
     { separator: true },
     { label: t("Switch Branch"), icon: "branch", action: () => openBranchOp("switch") },
     { label: t("Merge Branch"), icon: "commit", action: () => openBranchOp("merge") },
+    ...explorerItems(),
   ];
 }
 
@@ -71,6 +89,7 @@ export function rowMenu(row: FileRowDto, openDiff: (row: FileRowDto) => void): C
     { separator: true },
     { label: t("Switch Branch"), icon: "branch", action: () => openBranchOp("switch") },
     { label: t("Merge Branch"), icon: "commit", action: () => openBranchOp("merge") },
+    ...explorerItems(),
   );
   return items;
 }

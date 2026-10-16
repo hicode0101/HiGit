@@ -100,8 +100,11 @@
 pnpm install            # 安装前端依赖
 pnpm tauri dev          # 开发运行（vite dev server + tauri）
 pnpm tauri build        # 发布构建（Windows 产出 NSIS 安装包等）
+pnpm tauri build --no-bundle  # 只编译主程序不打包安装包（产物 target/release/higit.exe）
 cargo test --workspace  # 全量测试（49 项，见下）
 ```
+
+构建细节（含 `--no-bundle` 等参数说明）见 [docs/编译测试发布文档.md](docs/编译测试发布文档.md)。
 
 **测试构成（49 项）**：git2 引擎冒烟 28 · 引擎单元 10（差异统计 3 + SSH 凭证 6 + 凭证相等性 1）· 应用配置 7 · gitignore 模板 3 · 凭证存储 1
 

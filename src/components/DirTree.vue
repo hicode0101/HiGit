@@ -27,9 +27,11 @@ function onRowClick(row: TreeRowDto) {
 }
 
 function toRel(abs: string): string {
-  // 前端把绝对路径转成相对路径（分隔符已由后端统一为 /）
-  const root = store.repoPath.replace(/\/+$/, "");
-  return abs === root ? "" : abs.slice(root.length + 1);
+  // absPath / repoPath 是平台原生分隔符（Windows 反斜杠），统一转成 / 再转相对，
+  // 与文件列表 relPath、面包屑分段（split("/"))、状态条目前缀匹配保持一致
+  const a = abs.replace(/\\/g, "/");
+  const root = store.repoPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  return a === root ? "" : a.slice(root.length + 1);
 }
 </script>
 
