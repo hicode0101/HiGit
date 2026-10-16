@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 左侧边栏（图1/图2）：上半仓库列表（右键菜单），下半目录树；两区可独立折叠，收起后另一区占满全高 */
 import { computed, ref } from "vue";
-import { store, refreshStatus, refreshTree, refreshRepos, showError, toast, showConfirm } from "../store";
+import { store, refreshRepos, showError, showConfirm } from "../store";
 import { api } from "../api";
 import { t } from "../i18n";
 import { showContextMenu, type CtxMenuItem } from "../ctxmenu";
@@ -86,11 +86,6 @@ function toggleSection(which: "repos" | "tree") {
   else treeCollapsed.value = !treeCollapsed.value;
   setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
 }
-
-async function doRefresh() {
-  await Promise.all([refreshStatus(), refreshTree(), refreshRepos()]);
-  toast(t("Refresh"));
-}
 </script>
 
 <template>
@@ -105,12 +100,7 @@ async function doRefresh() {
     <div class="side-section tree" :class="{ collapsed: treeCollapsed }">
       <div class="side-head" @click="toggleSection('tree')">
         <span>{{ t("Directory") }}</span>
-        <span class="head-actions">
-          <button class="side-refresh" :title="t('Rescan repository status')" @click.stop="doRefresh">
-            <IconGlyph name="refresh" :size="14" />
-          </button>
-          <IconGlyph name="chevronDown" :size="14" :class="{ collapsed: treeCollapsed }" />
-        </span>
+        <IconGlyph name="chevronDown" :size="14" :class="{ collapsed: treeCollapsed }" />
       </div>
       <template v-if="!treeCollapsed">
         <DirTree v-if="hasRepo" />
@@ -171,12 +161,6 @@ async function doRefresh() {
   flex: none;
 }
 
-.head-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-
 .side-head svg {
   color: var(--text-tertiary);
   transition: transform 0.15s;
@@ -184,21 +168,6 @@ async function doRefresh() {
 
 .side-head svg.collapsed {
   transform: rotate(-90deg);
-}
-
-.side-refresh {
-  border: none;
-  background: none;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  padding: 3px;
-  border-radius: var(--radius-sm);
-  display: inline-flex;
-}
-
-.side-refresh:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
 }
 
 .side-empty {

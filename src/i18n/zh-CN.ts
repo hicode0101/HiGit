@@ -38,6 +38,7 @@ export const zhCN: Record<string, string> = {
   Name: "名称",
   Status: "状态",
   "Last Modified": "修改时间",
+  "Click to sort": "点击排序",
   Unmodified: "未修改",
   Modified: "已修改",
   Staged: "已暂存",

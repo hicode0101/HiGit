@@ -1,6 +1,6 @@
 <script setup lang="ts">
-/** 文件列表（图1）：名称(类型图标) / Git 状态 / 大小 / 修改时间 + 行内右键菜单（拉取/推送/提交/对比/撤销/分支操作） */
-import { computed } from "vue";
+/** 文件列表（图1）：名称(类型图标) / Git 状态 / 大小 / 修改时间，表头可点击排序 + 行内右键菜单（拉取/推送/提交/对比/撤销/分支操作） */
+import { computed, ref } from "vue";
 import { store, navigate } from "../store";
 import { t, formatDateTime, formatSize } from "../i18n";
 import { showContextMenu } from "../ctxmenu";
@@ -15,6 +15,49 @@ const showIgnored = computed(() => store.config?.showIgnored ?? false);
 const rows = computed(() =>
   store.fileRows.filter((r) => showIgnored.value || r.kind !== "ignored"),
 );
+
+// ---- 列排序：首次点击某列按降序，再点切换升序，循环往复；仅按名称排序时文件夹始终排在文件前面，其余列严格按内容混排 ----
+type SortKey = "name" | "status" | "size" | "mtime";
+const sortKey = ref<SortKey>("name");
+const sortDir = ref<1 | -1>(1);
+
+function setSort(key: SortKey) {
+  if (sortKey.value === key) {
+    sortDir.value = sortDir.value === 1 ? -1 : 1;
+  } else {
+    sortKey.value = key;
+    sortDir.value = -1; // 首次点击该列 = 降序
+  }
+}
+
+function byName(a: FileRowDto, b: FileRowDto): number {
+  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function compareByKey(a: FileRowDto, b: FileRowDto, key: SortKey): number {
+  switch (key) {
+    case "name":
+      return byName(a, b);
+    case "status":
+      return statusLabel(a.kind).localeCompare(statusLabel(b.kind)) || byName(a, b);
+    case "size":
+      return (a.size ?? -1) - (b.size ?? -1) || byName(a, b);
+    case "mtime":
+      return (a.mtimeUnix ?? 0) - (b.mtimeUnix ?? 0) || byName(a, b);
+  }
+}
+
+const sortedRows = computed(() => {
+  const list = [...rows.value];
+  const key = sortKey.value;
+  const dir = sortDir.value;
+  list.sort((a, b) => {
+    // 名称列：文件夹组始终在前（组内仍按当前方向排）；其他列文件夹与文件混排
+    if (key === "name" && a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return compareByKey(a, b, key) * dir;
+  });
+  return list;
+});
 
 function statusLabel(kind: string): string {
   const map: Record<string, string> = {
@@ -60,15 +103,27 @@ function fileIcon(row: FileRowDto): string {
 <template>
   <div class="file-table">
     <div class="table-head">
-      <div class="col-name">{{ t("Name") }}</div>
-      <div class="col-status">{{ t("Status") }}</div>
-      <div class="col-size">{{ t("Size") }}</div>
-      <div class="col-mtime">{{ t("Last Modified") }}</div>
+      <div class="col-name th-sort" :class="{ on: sortKey === 'name' }" :title="t('Click to sort')" @click="setSort('name')">
+        <span>{{ t("Name") }}</span>
+        <IconGlyph v-if="sortKey === 'name'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+      </div>
+      <div class="col-status th-sort" :class="{ on: sortKey === 'status' }" :title="t('Click to sort')" @click="setSort('status')">
+        <span>{{ t("Status") }}</span>
+        <IconGlyph v-if="sortKey === 'status'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+      </div>
+      <div class="col-size th-sort" :class="{ on: sortKey === 'size' }" :title="t('Click to sort')" @click="setSort('size')">
+        <span>{{ t("Size") }}</span>
+        <IconGlyph v-if="sortKey === 'size'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+      </div>
+      <div class="col-mtime th-sort" :class="{ on: sortKey === 'mtime' }" :title="t('Click to sort')" @click="setSort('mtime')">
+        <span>{{ t("Last Modified") }}</span>
+        <IconGlyph v-if="sortKey === 'mtime'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+      </div>
     </div>
 
     <div class="table-body">
       <div
-        v-for="row in rows"
+        v-for="row in sortedRows"
         :key="row.relPath"
         class="table-row"
         :class="{ dir: row.isDir, ignored: row.kind === 'ignored' }"
@@ -175,6 +230,32 @@ function fileIcon(row: FileRowDto): string {
   flex: none;
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+/* 表头可点击排序：悬停变色、激活列主题色 + 方向箭头（升序箭头翻转向上） */
+.th-sort {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.th-sort:hover {
+  color: var(--text-secondary);
+}
+
+.th-sort.on {
+  color: var(--accent);
+}
+
+.sort-arrow {
+  flex: none;
+  transition: transform 0.15s;
+}
+
+.sort-arrow.asc {
+  transform: rotate(180deg);
 }
 
 .status-badge {

@@ -9,7 +9,7 @@ function rowIndent(row: TreeRowDto): string {
 }
 
 async function onToggle(row: TreeRowDto) {
-  if (row.gitMeta) return; // .git 元目录恒折叠
+  if (row.gitMeta || !row.hasChildren) return; // .git 恒折叠；叶子目录没有下一级
   const p = row.absPath;
   if (store.treeExpanded.has(p)) {
     store.treeExpanded.delete(p);
@@ -24,6 +24,25 @@ function onRowClick(row: TreeRowDto) {
   const rel = toRel(row.absPath);
   if (row.gitMeta) return;
   void navigate(rel);
+}
+
+/** 双击目录：展开下一级目录列表（已展开则不动） */
+async function onRowDblclick(row: TreeRowDto) {
+  if (row.gitMeta || !row.hasChildren) return;
+  if (store.treeExpanded.has(row.absPath)) return;
+  store.treeExpanded.add(row.absPath);
+  await refreshTree();
+}
+
+/** 展开箭头只给可展开的行（.git 恒折叠、叶子目录不显示） */
+function showChevron(row: TreeRowDto): boolean {
+  return !row.gitMeta && row.hasChildren;
+}
+
+/** 图标区分：实心文件夹 = 还有子目录，描边 = 叶子目录，.git 保持特殊图标 */
+function folderIcon(row: TreeRowDto): string {
+  if (row.gitMeta) return "folder-git";
+  return row.hasChildren ? "folder-solid" : "folder";
 }
 
 function toRel(abs: string): string {
@@ -44,16 +63,17 @@ function toRel(abs: string): string {
       :style="{ paddingLeft: rowIndent(row) }"
       :class="{ gitMeta: row.gitMeta }"
       @click="onRowClick(row)"
+      @dblclick="onRowDblclick(row)"
     >
-      <span class="tw-spacer" @click.stop="onToggle(row)">
+      <span class="tw-spacer" :class="{ clickable: showChevron(row) }" @click.stop="onToggle(row)">
         <IconGlyph
-          v-if="!row.gitMeta"
+          v-if="showChevron(row)"
           :name="store.treeExpanded.has(row.absPath) ? 'chevronDown' : 'chevronRight'"
           :size="12"
           class="tw-chevron"
         />
       </span>
-      <IconGlyph :name="row.gitMeta ? 'folder-git' : 'folder'" :size="16" class="tw-icon" />
+      <IconGlyph :name="folderIcon(row)" :size="16" class="tw-icon" />
       <span class="ellipsis tw-name">{{ row.name }}</span>
     </div>
   </div>
@@ -93,6 +113,11 @@ function toRel(abs: string): string {
   justify-content: center;
   flex: none;
   color: var(--text-tertiary);
+  cursor: default;
+}
+
+.tw-spacer.clickable {
+  cursor: pointer;
 }
 
 .tw-chevron {

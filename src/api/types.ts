@@ -63,6 +63,8 @@ export interface TreeRowDto {
   name: string;
   level: number;
   gitMeta: boolean;
+  /** 目录下是否还有子目录（实心 / 描边文件夹图标区分） */
+  hasChildren: boolean;
 }
 
 export interface RepoSummaryDto {

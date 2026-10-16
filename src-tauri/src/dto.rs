@@ -129,6 +129,8 @@ pub struct TreeRowDto {
     pub level: u32,
     /// 根级 .git 元目录（特殊图标）
     pub git_meta: bool,
+    /// 目录下是否还有子目录（图标区分可展开 / 叶子目录）
+    pub has_children: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

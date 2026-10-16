@@ -849,12 +849,25 @@ pub async fn list_tree(app: AppHandle, expanded: Vec<String>) -> CmdResult<Vec<T
                 name,
                 level: 0,
                 git_meta: false,
+                has_children: has_subdir(&root),
             });
-            walk_tree(&root, &root, &set, 1, &mut rows, CAP);
+            // 根目录同样遵循展开状态：收起时只返回根行（前端 openRepo 默认展开根）
+            if set.contains(&abs_string(&root)) {
+                walk_tree(&root, &root, &set, 1, &mut rows, CAP);
+            }
             Ok(rows)
         })
     })
     .await
+}
+
+/// 目录下是否还有子目录（叶子目录不显示展开箭头 / 换实心图标区分）
+fn has_subdir(dir: &Path) -> bool {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    read.flatten()
+        .any(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
 }
 
 fn walk_tree(
@@ -889,6 +902,7 @@ fn walk_tree(
             name,
             level,
             git_meta,
+            has_children: has_subdir(&path),
         });
         if is_expanded {
             walk_tree(repo_root, &path, expanded, level + 1, rows, cap);
