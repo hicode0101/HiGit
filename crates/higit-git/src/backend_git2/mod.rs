@@ -1206,8 +1206,9 @@ impl GitEngine for Git2Backend {
         })
     }
 
-    /// 按路径提交：临时索引 = HEAD 树 + 勾选路径的暂存条目（git commit -- <paths> 语义），
-    /// 仓库真实索引不动——范围外的暂存内容提交后仍保持暂存状态。
+    /// 按路径提交（git commit -- <paths> 语义）：勾选路径先按工作区内容暂存进真实索引
+    /// （未暂存修改 / 未跟踪新增 / 已删除与 stage 同语义一并纳入），临时索引 = HEAD 树 +
+    /// 这些路径的最新暂存条目；范围外的暂存内容不进入提交且保持暂存状态。
     fn commit_partial(
         &self,
         session: &RepoSession,
@@ -1215,20 +1216,32 @@ impl GitEngine for Git2Backend {
         author: Option<&Identity>,
         paths: &[String],
     ) -> Result<String> {
-        self.with_session(session, |_s, repo| {
+        self.with_session(session, |s, repo| {
             let identity = resolve_identity(repo, author)?;
             let sig = Signature::now(&identity.name, &identity.email)
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
 
             let err = |e: git2::Error| HigitError::new(ErrorCode::Unknown, e.message());
             let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+            // 勾选路径先按工作区内容暂存：只复制仓库索引条目的话，未暂存文件取到的是
+            // HEAD 旧内容，拼出的树与 HEAD 相同，会产生空提交
+            let rels: Vec<PathBuf> = paths.iter().map(|p| PathBuf::from(p.replace('\\', "/"))).collect();
+            let mut repo_index = repo.index().map_err(err)?;
+            for rel in &rels {
+                if s.workdir.join(rel).is_file() {
+                    repo_index.add_path(rel).map_err(err)?;
+                } else {
+                    // 工作区已无此文件：暂存删除；索引里也没有则忽略
+                    let _ = repo_index.remove_path(rel);
+                }
+            }
+            repo_index.write().map_err(err)?;
+
             let mut tmp = git2::Index::new().map_err(err)?;
             if let Some(c) = &head {
                 tmp.read_tree(&c.tree().map_err(err)?).map_err(err)?;
             }
-            let repo_index = repo.index().map_err(err)?;
-            for p in paths {
-                let rel = Path::new(p);
+            for rel in &rels {
                 match repo_index.get_path(rel, 0) {
                     Some(entry) => tmp.add(&entry).map_err(err)?,
                     // 暂存删除：索引已无此条目，从基树中移除
@@ -1236,6 +1249,12 @@ impl GitEngine for Git2Backend {
                 }
             }
             let tree_oid = tmp.write_tree_to(repo).map_err(err)?;
+            // 拼出的树与 HEAD 相同说明无变更可提交，拒绝（git 默认不产生空提交）
+            if let Some(c) = &head {
+                if tree_oid == c.tree_id() && repo.find_reference("MERGE_HEAD").is_err() {
+                    return Err(HigitError::new(ErrorCode::Unknown, "nothing to commit"));
+                }
+            }
             let tree = repo.find_tree(tree_oid).map_err(err)?;
 
             let mut parents: Vec<git2::Commit> = head.into_iter().collect();

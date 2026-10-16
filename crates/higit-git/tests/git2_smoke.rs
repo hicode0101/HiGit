@@ -282,6 +282,62 @@ fn stage_unstage_and_commit_roundtrip() {
 }
 
 #[test]
+fn commit_partial_includes_unstaged_workdir_changes() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // 未暂存修改 + 未跟踪新增：对话框勾选语义 = git commit -- <paths>，
+    // 不先 stage 直接按路径提交，工作区内容必须入库（回归：曾产生空提交）
+    write(&dir.0.join("README.md"), "# updated\n");
+    write(&dir.0.join("new.txt"), "new\n");
+    let oid = backend
+        .commit_partial(
+            &session,
+            "commit checked paths",
+            None,
+            &["README.md".to_string(), "new.txt".to_string()],
+        )
+        .unwrap();
+    let detail = backend.commit_detail(&session, &oid).unwrap();
+    assert!(detail.files.iter().any(|f| f.path == Path::new("README.md")));
+    assert!(detail.files.iter().any(|f| f.path == Path::new("new.txt")));
+
+    // 勾选路径的变更全部入库 → 工作区干净
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert!(
+        st.entries
+            .iter()
+            .all(|e| e.kind == FileStatusKind::Clean || e.kind == FileStatusKind::Ignored)
+    );
+}
+
+#[test]
+fn commit_partial_stages_deletion_and_rejects_empty_commit() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // 工作区删除已跟踪文件：按路径提交应入库删除（索引与基树都移除）
+    fs::remove_file(dir.0.join("README.md")).unwrap();
+    backend
+        .commit_partial(&session, "remove README", None, &["README.md".to_string()])
+        .unwrap();
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert!(
+        st.entries
+            .iter()
+            .all(|e| e.kind == FileStatusKind::Clean || e.kind == FileStatusKind::Ignored)
+    );
+
+    // 无任何变更时按路径提交 → 拒绝（git 默认不产生空提交）
+    let r = backend.commit_partial(&session, "empty", None, &[".gitignore".to_string()]);
+    assert!(r.is_err());
+}
+
+#[test]
 fn discard_restores_modified_and_removes_untracked() {
     let dir = temp_repo();
     init_with_commit(&dir.0);
