@@ -307,7 +307,7 @@ export const zhCN: Record<string, string> = {
   Path: "路径",
   Size: "大小",
   Renamed: "重命名",
-  "Commit message": "提交信息",
+  "Commit message": "此处 提交信息 为必填项，否则不能提交",
   Selected: "已选",
   "To change the committer, go to Repository Settings": "如需修改提交者，请前往「仓库设置」修改",
   "Identity not configured": "未配置提交身份",
