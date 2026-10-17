@@ -10,6 +10,8 @@ import type {
   CommitPreviewDto,
   ConfigDto,
   CredsDto,
+  CleanOptsDto,
+  CleanOutcomeDto,
   DiffDto,
   FileRowDto,
   IdentityDto,
@@ -91,6 +93,7 @@ export const api = {
   stagePaths: (paths: string[]) => invoke<StatusDto>("stage_paths", { paths }),
   unstagePaths: (paths: string[]) => invoke<StatusDto>("unstage_paths", { paths }),
   discardPaths: (paths: string[]) => invoke<StatusDto>("discard_paths", { paths }),
+  cleanWorktree: (opts: CleanOptsDto) => invoke<CleanOutcomeDto>("clean_worktree", { opts }),
   commit: (message: string, amend: boolean, paths?: string[]) =>
     invoke<string>("commit", { message, amend, paths: paths ?? null }),
   commitPreview: (rel: string) => invoke<CommitPreviewDto>("commit_preview", { rel }),

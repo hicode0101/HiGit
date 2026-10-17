@@ -208,3 +208,37 @@ pub struct MergeOutcome {
     /// 冲突文件列表（FR-5.8 P0）；非空表示合并被阻断、仓库处于冲突状态
     pub conflicts: Vec<PathBuf>,
 }
+
+/// 清理范围（git clean 的 -f / -fx / -fX 组合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanMode {
+    /// 未跟踪 + 被忽略（-fx）
+    All,
+    /// 仅未跟踪（-f）
+    UntrackedOnly,
+    /// 仅被忽略（-fX）
+    IgnoredOnly,
+}
+
+/// 工作区清理选项（git clean 语义）。
+#[derive(Debug, Clone)]
+pub struct CleanOptions {
+    pub mode: CleanMode,
+    /// 同时清理未跟踪 / 被忽略目录（-d；false 时目录条目整体跳过，与 git clean 一致）
+    pub dirs: bool,
+    /// 移除包含 .git 的未管理目录（-ff；false 时此类目录视为嵌套仓库跳过）
+    pub force_git_dirs: bool,
+    /// 试运行：只收集将要清理的路径，不执行删除
+    pub dry_run: bool,
+    /// true = 直接删除；false = 移入系统回收站（默认，可从回收站恢复）
+    pub no_recycle_bin: bool,
+}
+
+/// 工作区清理结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CleanOutcome {
+    /// 已清理（试运行 = 将被清理）的相对路径（正斜杠）
+    pub paths: Vec<PathBuf>,
+    /// 删除失败的路径及原因（试运行恒为空）
+    pub failed: Vec<(PathBuf, String)>,
+}

@@ -951,6 +951,19 @@ pub async fn discard_paths(app: AppHandle, paths: Vec<String>) -> CmdResult<Stat
     .await
 }
 
+/// 工作区清理（git clean 语义）：按清理对话框选项删除未跟踪 / 被忽略条目
+#[tauri::command]
+pub async fn clean_worktree(app: AppHandle, opts: CleanOptsDto) -> CmdResult<CleanOutcomeDto> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        with_session(&state, |state, h| {
+            let o = state.engine.clean_worktree(&h.session, &opts.to_model())?;
+            Ok(CleanOutcomeDto::from_model(&o))
+        })
+    })
+    .await
+}
+
 /// 提交身份：仓库设置（config 条目）优先；否则后端回退 git 配置（仓库级 → 全局）。
 fn commit_identity(state: &AppState, repo: &Path) -> Option<Identity> {
     let cfg = state.config.lock().unwrap();

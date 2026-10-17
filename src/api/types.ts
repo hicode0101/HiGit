@@ -181,6 +181,27 @@ export interface MergeOutcomeDto {
   conflicts: string[];
 }
 
+/** 工作区清理请求（git clean 组合） */
+export interface CleanOptsDto {
+  /** "all" = -fx；"untracked" = -f；"ignored" = -fX */
+  mode: "all" | "untracked" | "ignored";
+  dirs: boolean;
+  forceGitDirs: boolean;
+  dryRun: boolean;
+  noRecycleBin: boolean;
+}
+
+export interface CleanFailedDto {
+  path: string;
+  reason: string;
+}
+
+export interface CleanOutcomeDto {
+  /** 已清理（试运行 = 将被清理）的相对路径 */
+  paths: string[];
+  failed: CleanFailedDto[];
+}
+
 export interface CredsDto {
   kind: "http" | "ssh";
   username: string;

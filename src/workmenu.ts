@@ -19,6 +19,16 @@ export function openDiscard(target: string, isFile: boolean) {
   store.ui.discard = { target, isFile };
 }
 
+/** 打开清理对话框（git clean 语义，作用于整个工作区） */
+export function openClean() {
+  store.ui.clean = true;
+}
+
+/** 整个工作区是否存在可清理条目（未跟踪 / 被忽略）；无可清理时菜单项禁用 */
+function hasCleanable(): boolean {
+  return !!store.status?.entries.some((e) => e.kind === "untracked" || e.kind === "ignored");
+}
+
 /** 打开分支操作对话框：switch = 切换分支（git switch）；merge = 合并分支（git merge） */
 export function openBranchOp(op: "switch" | "merge") {
   store.ui.branchOp = op;
@@ -54,6 +64,7 @@ export function blankMenu(): CtxMenuItem[] {
       disabled: changedUnder(store.currentDir) === 0,
       action: () => openDiscard(store.currentDir, false),
     },
+    { label: t("Clean"), icon: "clean", disabled: !hasCleanable(), action: openClean },
     { separator: true },
     { label: t("Switch Branch"), icon: "branch", action: () => openBranchOp("switch") },
     { label: t("Merge Branch"), icon: "commit", action: () => openBranchOp("merge") },
@@ -86,6 +97,7 @@ export function rowMenu(row: FileRowDto, openDiff: (row: FileRowDto) => void): C
     action: () => openDiscard(row.relPath, !row.isDir),
   });
   items.push(
+    { label: t("Clean"), icon: "clean", disabled: !hasCleanable(), action: openClean },
     { separator: true },
     { label: t("Switch Branch"), icon: "branch", action: () => openBranchOp("switch") },
     { label: t("Merge Branch"), icon: "commit", action: () => openBranchOp("merge") },

@@ -57,6 +57,8 @@ export interface UiState {
   commitDialog: boolean;
   /** 撤销修改对话框（工作区右键）：target = 目录（isFile=false，空白区为当前浏览目录）或文件 */
   discard: { target: string; isFile: boolean } | null;
+  /** 清理对话框（工作区右键）：git clean 语义，作用于整个工作区 */
+  clean: boolean;
   /** 分支操作对话框（工作区右键）：switch = 切换分支；merge = 合并分支 */
   branchOp: "switch" | "merge" | null;
   legend: boolean;
@@ -118,6 +120,7 @@ export const store = reactive({
     syncDialog: null,
     commitDialog: false,
     discard: null,
+    clean: false,
     branchOp: null,
     legend: false,
     about: false,

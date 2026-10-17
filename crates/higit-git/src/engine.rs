@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{HigitError, Result};
 use crate::model::{
-    BranchInfo, CommitDetail, CommitEntry, DiffSpec, HeadInfo, Identity, IdentityScope,
-    MergeOutcome, RepoStatus, StatusOpts, TextDiff,
+    BranchInfo, CleanOptions, CleanOutcome, CommitDetail, CommitEntry, DiffSpec, HeadInfo,
+    Identity, IdentityScope, MergeOutcome, RepoStatus, StatusOpts, TextDiff,
 };
 
 /// 长任务取消令牌。
@@ -341,6 +341,11 @@ pub trait GitEngine: Send + Sync {
 
     fn discard(&self, _session: &RepoSession, _paths: &[PathBuf]) -> Result<()> {
         Err(HigitError::not_implemented("discard"))
+    }
+
+    /// 工作区清理（git clean 语义）：列举未跟踪 / 被忽略条目并删除
+    fn clean_worktree(&self, _session: &RepoSession, _opts: &CleanOptions) -> Result<CleanOutcome> {
+        Err(HigitError::not_implemented("clean_worktree"))
     }
 
     fn commit(

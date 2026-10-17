@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use higit_git::factory::{BackendKind, create_backend};
-use higit_git::model::{FileStatusKind, StatusOpts};
+use higit_git::model::{CleanMode, CleanOptions, FileStatusKind, StatusOpts};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -1100,4 +1100,103 @@ fn stage_deleted_file_stages_removal() {
             .iter()
             .all(|e| matches!(e.kind, FileStatusKind::Clean | FileStatusKind::Ignored))
     );
+}
+
+/// 清理（git clean）：模式 / 目录 / 嵌套仓库跳过 / 回收站开关（测试走直接删除）
+#[test]
+fn clean_worktree_respects_mode_dirs_and_nested_git() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    write(&dir.0.join("untracked.txt"), "u\n");
+    write(&dir.0.join("cache.tmp"), "ignored\n"); // .gitignore 已含 cache.tmp
+    write(&dir.0.join("sub/nested.txt"), "n\n");
+    // 嵌套仓库：sub2 含 .git，不带 -ff 时必须跳过
+    let sub2 = dir.0.join("sub2");
+    fs::create_dir_all(sub2.join(".git")).unwrap();
+    write(&sub2.join("x.txt"), "x\n");
+
+    // UntrackedOnly + 不含目录：只清理顶层未跟踪文件；被忽略文件与目录条目保留
+    let o = backend
+        .clean_worktree(
+            &session,
+            &CleanOptions {
+                mode: CleanMode::UntrackedOnly,
+                dirs: false,
+                force_git_dirs: false,
+                dry_run: false,
+                no_recycle_bin: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(o.paths, vec![PathBuf::from("untracked.txt")]);
+    assert!(o.failed.is_empty());
+    assert!(!dir.0.join("untracked.txt").exists());
+    assert!(dir.0.join("cache.tmp").exists());
+    assert!(dir.0.join("sub").exists());
+    assert!(sub2.exists());
+
+    // All + 目录：清理被忽略文件与未跟踪目录；sub2/ 因含 .git 被跳过
+    let o = backend
+        .clean_worktree(
+            &session,
+            &CleanOptions {
+                mode: CleanMode::All,
+                dirs: true,
+                force_git_dirs: false,
+                dry_run: false,
+                no_recycle_bin: true,
+            },
+        )
+        .unwrap();
+    assert!(o.paths.iter().any(|p| p == Path::new("cache.tmp")));
+    assert!(o.paths.iter().any(|p| p == Path::new("sub/")));
+    assert!(!o.paths.iter().any(|p| p.starts_with("sub2")));
+    assert!(!dir.0.join("cache.tmp").exists());
+    assert!(!dir.0.join("sub").exists());
+    assert!(sub2.exists());
+
+    // IgnoredOnly：只清理被忽略文件
+    write(&dir.0.join("cache.tmp"), "ignored\n");
+    let o = backend
+        .clean_worktree(
+            &session,
+            &CleanOptions {
+                mode: CleanMode::IgnoredOnly,
+                dirs: true,
+                force_git_dirs: false,
+                dry_run: false,
+                no_recycle_bin: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(o.paths, vec![PathBuf::from("cache.tmp")]);
+    assert!(!dir.0.join("cache.tmp").exists());
+}
+
+/// 试运行：只收集将清理的路径，不实际删除
+#[test]
+fn clean_worktree_dry_run_keeps_files() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    write(&dir.0.join("u.txt"), "u\n");
+    let o = backend
+        .clean_worktree(
+            &session,
+            &CleanOptions {
+                mode: CleanMode::All,
+                dirs: true,
+                force_git_dirs: false,
+                dry_run: true,
+                no_recycle_bin: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(o.paths, vec![PathBuf::from("u.txt")]);
+    assert!(dir.0.join("u.txt").exists());
 }

@@ -42,6 +42,7 @@ pub fn run() {
             commands::stage_paths,
             commands::unstage_paths,
             commands::discard_paths,
+            commands::clean_worktree,
             commands::commit,
             commands::commit_preview,
             commands::last_commit_message,

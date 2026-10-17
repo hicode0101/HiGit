@@ -29,9 +29,9 @@ use crate::engine::{
 };
 use crate::error::{AuthDetail, AuthKind, ErrorCode, HigitError, Result};
 use crate::model::{
-    BranchInfo, CommitDetail, CommitEntry, CommitFile, CommitFileKind, DiffLine, DiffLineOrigin,
-    DiffSpec, FileEntry, FileStatusKind, HeadInfo, Identity, IdentityScope, MergeOutcome,
-    RepoStatus, StatusOpts, TextDiff,
+    BranchInfo, CleanMode, CleanOptions, CleanOutcome, CommitDetail, CommitEntry, CommitFile,
+    CommitFileKind, DiffLine, DiffLineOrigin, DiffSpec, FileEntry, FileStatusKind, HeadInfo,
+    Identity, IdentityScope, MergeOutcome, RepoStatus, StatusOpts, TextDiff,
 };
 
 mod ssh;
@@ -1054,6 +1054,78 @@ impl GitEngine for Git2Backend {
                     .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
             }
             Ok(())
+        })
+    }
+
+    /// 工作区清理（git clean 语义）：按状态列举未跟踪 / 被忽略条目后删除。
+    /// 不递归列举 → 未跟踪 / 被忽略目录聚合为 `dir/` 条目，与 -d 语义一致（不勾选则整体跳过）；
+    /// 含 .git 的目录视为嵌套仓库，force_git_dirs（-ff）为 false 时跳过；
+    /// 默认移入回收站，no_recycle_bin = true 时直接删除；子模块条目始终排除。
+    fn clean_worktree(&self, session: &RepoSession, opts: &CleanOptions) -> Result<CleanOutcome> {
+        self.with_session(session, |s, repo| {
+            let mut sopts = git2::StatusOptions::new();
+            sopts.include_untracked(true).include_ignored(true).exclude_submodules(true);
+            let statuses = repo
+                .statuses(Some(&mut sopts))
+                .map_err(|e| HigitError::new(ErrorCode::StatusFailed, e.message()))?;
+
+            // 筛选目标条目：(相对路径, 是否目录条目)。git2 目录条目路径带尾斜杠
+            let mut targets: Vec<(PathBuf, bool)> = Vec::new();
+            for entry in statuses.iter() {
+                let st = entry.status();
+                let ignored = st.is_ignored();
+                let untracked = st.is_wt_new();
+                if !ignored && !untracked {
+                    continue;
+                }
+                let want = if ignored {
+                    matches!(opts.mode, CleanMode::All | CleanMode::IgnoredOnly)
+                } else {
+                    matches!(opts.mode, CleanMode::All | CleanMode::UntrackedOnly)
+                };
+                if !want {
+                    continue;
+                }
+                let raw = match entry.path() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let is_dir = raw.ends_with('/');
+                if is_dir && !opts.dirs {
+                    continue;
+                }
+                let rel = PathBuf::from(raw.replace('\\', "/"));
+                // 含 .git 的目录 = 嵌套仓库：git clean -fd 拒绝删除，需 -ff 才移除
+                if is_dir && !opts.force_git_dirs && s.workdir.join(&rel).join(".git").exists() {
+                    continue;
+                }
+                targets.push((rel, is_dir));
+            }
+
+            let mut outcome = CleanOutcome::default();
+            for (rel, is_dir) in &targets {
+                if opts.dry_run {
+                    outcome.paths.push(rel.clone());
+                    continue;
+                }
+                let abs = s.workdir.join(rel);
+                let result = if opts.no_recycle_bin {
+                    if *is_dir {
+                        std::fs::remove_dir_all(&abs)
+                    } else {
+                        std::fs::remove_file(&abs)
+                    }
+                } else {
+                    trash::delete(&abs).map_err(|e| std::io::Error::other(e.to_string()))
+                };
+                match result {
+                    Ok(()) => outcome.paths.push(rel.clone()),
+                    Err(e) => outcome
+                        .failed
+                        .push((rel.clone(), e.to_string())),
+                }
+            }
+            Ok(outcome)
         })
     }
 

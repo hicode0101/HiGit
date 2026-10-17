@@ -14,6 +14,9 @@ backend-cli = []
 
 [dependencies]
 git2 = { workspace = true, optional = true }
+# 工作区清理（git clean）默认移入系统回收站（TortoiseGit 行为，可从回收站恢复）；
+# 勾选「不使用回收站」时走 std::fs 直接删除
+trash = "5"
 
 # Unix（Linux/macOS）统一从源码编译 OpenSSL（vendored）：macOS Intel 包是在
 # M 系列 runner 上交叉编译的，系统里只有 arm64 的 Homebrew OpenSSL，openssl-sys

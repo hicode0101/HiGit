@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use higit_git::model::{
-    BranchInfo, CommitDetail, CommitEntry, CommitFile, CommitFileKind, DiffLine, DiffLineOrigin,
-    FileStatusKind, Identity, MergeOutcome, RepoStatus, TextDiff,
+    BranchInfo, CleanOptions, CleanOutcome, CleanMode, CommitDetail, CommitEntry, CommitFile,
+    CommitFileKind, DiffLine, DiffLineOrigin, FileStatusKind, Identity, MergeOutcome, RepoStatus,
+    TextDiff,
 };
 
 pub fn kind_str(k: FileStatusKind) -> String {
@@ -391,6 +392,69 @@ impl MergeOutcomeDto {
             fast_forward: m.fast_forward,
             updated: m.updated,
             conflicts: m.conflicts.iter().map(|p| rel_string(p)).collect(),
+        }
+    }
+}
+
+/// 工作区清理请求（git clean 组合；前端清理对话框提交）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanOptsDto {
+    /// "all" = -fx；"untracked" = -f；"ignored" = -fX
+    pub mode: String,
+    #[serde(default)]
+    pub dirs: bool,
+    #[serde(default)]
+    pub force_git_dirs: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub no_recycle_bin: bool,
+}
+
+impl CleanOptsDto {
+    pub fn to_model(&self) -> CleanOptions {
+        CleanOptions {
+            mode: match self.mode.as_str() {
+                "untracked" => CleanMode::UntrackedOnly,
+                "ignored" => CleanMode::IgnoredOnly,
+                _ => CleanMode::All,
+            },
+            dirs: self.dirs,
+            force_git_dirs: self.force_git_dirs,
+            dry_run: self.dry_run,
+            no_recycle_bin: self.no_recycle_bin,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanFailedDto {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanOutcomeDto {
+    /// 已清理（试运行 = 将被清理）的相对路径
+    pub paths: Vec<String>,
+    pub failed: Vec<CleanFailedDto>,
+}
+
+impl CleanOutcomeDto {
+    pub fn from_model(m: &CleanOutcome) -> Self {
+        Self {
+            paths: m.paths.iter().map(|p| rel_string(p)).collect(),
+            failed: m
+                .failed
+                .iter()
+                .map(|(p, r)| CleanFailedDto {
+                    path: rel_string(p),
+                    reason: r.clone(),
+                })
+                .collect(),
         }
     }
 }
