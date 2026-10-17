@@ -6,6 +6,7 @@ import { api } from "../api";
 import type { RepoEntryDto } from "../api/types";
 import { t } from "../i18n";
 import { detectAuthFromUrl } from "../urlAuth";
+import { isValidEmail } from "../validate";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
 
@@ -28,10 +29,26 @@ const keyPath = ref("");
 const rememberCred = ref(true);
 /** 系统凭证管理器中是否已存有该仓库的 HTTPS 凭证（回显提示，密码本身不回显） */
 const credSaved = ref(false);
-// Git 身份页（与克隆对话框一致）：姓名 / 邮箱双列，两栏留空跟随全局
+// Git 身份页（与克隆对话框一致）：姓名 / 邮箱必填，留空的字段回退全局配置，两栏全空 = 跟随全局
 const idName = ref("");
 const idEmail = ref("");
 const loadedFor = ref("");
+const globalId = ref<{ name: string; email: string } | null>(null);
+
+/** 邮箱非空但格式非法：禁止保存并提示（留空 = 清除 / 跟随全局，允许） */
+const idEmailInvalid = computed(() => idEmail.value.trim() !== "" && !isValidEmail(idEmail.value));
+
+/** 输入留空的字段回退全局配置；解析出完整姓名邮箱才允许保存 */
+const resolvedName = computed(() => idName.value.trim() || globalId.value?.name || "");
+const resolvedEmail = computed(() => idEmail.value.trim() || globalId.value?.email || "");
+const identityComplete = computed(() => !!resolvedName.value && !!resolvedEmail.value);
+
+/** 认证必填：HTTPS 需用户名 + 密码 / Token（已存凭证可沿用，密码留空 = 保持不变）；SSH 需密钥文件 */
+const authComplete = computed(() =>
+  authKind.value === "ssh"
+    ? !!keyPath.value.trim()
+    : (!!username.value.trim() && !!password.value) || credSaved.value,
+);
 
 async function load() {
   const repoId = store.ui.repoSettingsId;
@@ -51,6 +68,10 @@ async function load() {
     idEmail.value = e.identity?.email ?? "";
     // 已保存凭证徽章（密码属机密不回显，仅提示存在与否）
     credSaved.value = await api.repoCredentialSaved(repoId).catch(() => false);
+    // 全局身份：输入留空字段的回退来源（输入框下方提示将采用的全局值）
+    if (!globalId.value) {
+      globalId.value = await api.getGlobalIdentity().catch(() => null);
+    }
   } catch (err) {
     showError(err as Error);
   }
@@ -84,6 +105,29 @@ async function save() {
     store.ui.error = { message: t("Repository name cannot be empty"), raw: "" };
     return;
   }
+  if (idEmailInvalid.value) {
+    store.ui.error = { message: t("Invalid email format"), raw: "" };
+    return;
+  }
+  // 姓名 / 邮箱必填：留空字段回退全局配置，两边都解析不出则拒绝保存
+  if (!identityComplete.value) {
+    store.ui.error = {
+      message: t("Global identity is not configured. Fill in the name and email, or set them in Settings first."),
+      raw: "",
+    };
+    return;
+  }
+  // 认证必填：HTTPS 用户名 + 密码 / Token（已存凭证可沿用）；SSH 密钥文件
+  if (!authComplete.value) {
+    store.ui.error = {
+      message:
+        authKind.value === "ssh"
+          ? t("SSH authentication requires a key file.")
+          : t("HTTPS authentication requires a username and password / token."),
+      raw: "",
+    };
+    return;
+  }
   const auth =
     authKind.value === "ssh"
       ? { kind: "ssh" as const, username: username.value.trim() || "git", keyPath: keyPath.value.trim() }
@@ -99,8 +143,8 @@ async function save() {
       url: url.value.trim(),
       identity:
         !idName.value.trim() && !idEmail.value.trim()
-          ? null
-          : { name: idName.value, email: idEmail.value },
+          ? null // 两栏全空 = 跟随全局（运行时按全局身份回退），不落具体值
+          : { name: resolvedName.value, email: resolvedEmail.value },
       // HTTPS 凭证随设置一并提交，由后端写入系统凭证管理器（host 解析含 git 配置回退）；
       // 留空 = 保持已存凭证不变；保存失败会在此抛错提示，不再静默
       password: authKind.value === "http" ? password.value : undefined,
@@ -163,11 +207,18 @@ async function save() {
         <div class="form-row">
           <label>{{ t("SSH key file") }}</label>
           <div class="form-inline">
-            <input v-model="keyPath" :placeholder="t('Empty = try ssh-agent and default keys')" />
+            <input v-model="keyPath" />
             <button class="btn" @click="chooseKey">{{ t("Choose…") }}</button>
           </div>
         </div>
       </template>
+      <div v-if="!authComplete" class="hint-line invalid-hint">
+        {{
+          authKind === "ssh"
+            ? t("SSH authentication requires a key file.")
+            : t("HTTPS authentication requires a username and password / token.")
+        }}
+      </div>
     </div>
 
     <div v-show="tab === 2">
@@ -175,20 +226,36 @@ async function save() {
         <div class="form-row">
           <label>{{ t("Your Name") }}</label>
           <input v-model="idName" />
+          <span v-if="!idName.trim() && globalId?.name" class="fallback-hint">
+            {{ t("Leave empty to use the global identity: {0}", { 0: globalId.name }) }}
+          </span>
         </div>
         <div class="form-row">
           <label>{{ t("Email") }}</label>
           <input v-model="idEmail" />
+          <span v-if="idEmailInvalid" class="invalid-hint">{{ t("Invalid email format") }}</span>
+          <span v-else-if="!idEmail.trim() && globalId?.email" class="fallback-hint">
+            {{ t("Leave empty to use the global identity: {0}", { 0: globalId.email }) }}
+          </span>
         </div>
       </div>
       <div class="hint-line">
         {{ t("Used as the committer for this repository; leave both empty to follow the global identity") }}
       </div>
+      <div v-if="!identityComplete" class="hint-line invalid-hint">
+        {{ t("Global identity is not configured. Fill in the name and email, or set them in Settings first.") }}
+      </div>
     </div>
 
     <template #footer>
       <button class="btn" @click="emit('close')">{{ t("Cancel") }}</button>
-      <button class="btn primary" :disabled="!alias.trim()" @click="save">{{ t("Save") }}</button>
+      <button
+        class="btn primary"
+        :disabled="!alias.trim() || idEmailInvalid || !identityComplete || !authComplete"
+        @click="save"
+      >
+        {{ t("Save") }}
+      </button>
     </template>
   </DialogBase>
 </template>
@@ -238,6 +305,16 @@ async function save() {
   color: var(--text-tertiary);
   font-size: 12px;
   margin: -8px 0 8px;
+}
+
+.invalid-hint {
+  color: var(--status-modified);
+  font-size: 11px;
+}
+
+.fallback-hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 .identity-grid {

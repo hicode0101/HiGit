@@ -161,7 +161,7 @@ export const zhCN: Record<string, string> = {
   "Password / Token": "密码 / Token",
   "SSH key file": "SSH 密钥文件",
   Passphrase: "密钥口令",
-  "Empty = try ssh-agent and default keys": "留空则依次尝试 ssh-agent 与默认密钥",
+  // 已废弃移除："Empty = try ssh-agent and default keys"——认证方式选定后密钥文件为必填项（2026-10）
   "Remember credentials in system credential manager": "记住凭证（保存到系统凭证管理器）",
   "Saved in system credential manager. Leave empty to keep it.":
     "已保存到系统凭证管理器；留空则保持已存凭证不变",
@@ -169,6 +169,9 @@ export const zhCN: Record<string, string> = {
   "Hide password": "隐藏明文",
   "Sign in": "登录",
   "Username and password are required": "请填写用户名和密码",
+  "HTTPS authentication requires a username and password / token.":
+    "HTTPS 认证需填写用户名和密码 / Token",
+  "SSH authentication requires a key file.": "SSH 认证需选择密钥文件",
   Language: "语言",
   Theme: "主题",
   Light: "浅色",
@@ -258,6 +261,13 @@ export const zhCN: Record<string, string> = {
     "SOCKS 代理与内置引擎兼容性差（常表现为超时），建议填 HTTP 代理地址，如 http://127.0.0.1:8080",
   "Name and email are required": "Git 身份的姓名和邮箱为必填项",
   "Invalid email format": "邮箱格式不正确",
+  "Set up Git identity": "配置 Git 身份",
+  "HiGit needs a global Git identity (name and email) before you can start. It is written to the global Git config and used as the default committer.":
+    "使用 HiGit 前需先配置全局 Git 身份（姓名和邮箱）。它将写入全局 Git 配置（~/.gitconfig），作为默认提交者身份。",
+  "Save and start": "保存并开始使用",
+  "Leave empty to use the global identity: {0}": "留空将使用全局配置：{0}",
+  "Global identity is not configured. Fill in the name and email, or set them in Settings first.":
+    "全局身份未配置：请填写姓名和邮箱，或先到「设置 → Git 身份」配置",
   "Show in Explorer": "在资源管理器中显示",
   Fetched: "已抓取",
   "Repository Settings": "仓库设置",

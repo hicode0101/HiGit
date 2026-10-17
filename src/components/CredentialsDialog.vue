@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 凭证对话框（FR-5.5 / FR-5.6）：HTTPS 用户名+密码 / SSH 密钥+口令，可记住 */
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { store, showError, toast } from "../store";
 import { api } from "../api";
 import { t } from "../i18n";
@@ -16,6 +16,14 @@ const secret = ref("");
 const keyPath = ref("");
 const passphrase = ref("");
 const remember = ref(true);
+
+/** 认证必填：HTTPS 用户名（可由认证上下文预填）+ 密码 / Token；SSH 密钥文件 */
+const canSubmit = computed(() => {
+  const p = payload();
+  return p.kind === "http"
+    ? !!(username.value.trim() || p.username) && !!secret.value
+    : !!keyPath.value.trim();
+});
 
 async function chooseKey() {
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -77,7 +85,7 @@ async function submit() {
     </template>
     <template v-else>
       <div class="form-row">
-        <label>{{ t("SSH key file") }} — {{ t("Empty = try ssh-agent and default keys") }}</label>
+        <label>{{ t("SSH key file") }}</label>
         <div class="form-inline">
           <input v-model="keyPath" />
           <button class="btn" @click="chooseKey">{{ t("Choose…") }}</button>
@@ -89,6 +97,14 @@ async function submit() {
       </div>
     </template>
 
+    <div v-if="!canSubmit" class="hint invalid-hint">
+      {{
+        payload().kind === "ssh"
+          ? t("SSH authentication requires a key file.")
+          : t("Username and password are required")
+      }}
+    </div>
+
     <label class="check">
       <input v-model="remember" type="checkbox" />
       <span>{{ t("Remember credentials in system credential manager") }}</span>
@@ -96,7 +112,7 @@ async function submit() {
 
     <template #footer>
       <button class="btn" @click="emit('close')">{{ t("Cancel") }}</button>
-      <button class="btn primary" @click="submit">{{ t("Sign in") }}</button>
+      <button class="btn primary" :disabled="!canSubmit" @click="submit">{{ t("Sign in") }}</button>
     </template>
   </DialogBase>
 </template>
@@ -106,6 +122,11 @@ async function submit() {
   font-size: 13px;
   margin-bottom: 14px;
   color: var(--text-secondary);
+}
+
+.invalid-hint {
+  color: var(--status-modified);
+  font-size: 12px;
 }
 
 .form-row {

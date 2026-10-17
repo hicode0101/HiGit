@@ -66,6 +66,8 @@ export interface UiState {
   commitDiff: { oid: string; path: string } | null;
   credentials: CredentialsPayload | null;
   identityGuide: boolean;
+  /** 全局 Git 身份门禁：启动检查到全局身份缺失时强制配置，完成后才能使用 */
+  identityGate: boolean;
   error: ErrorPayload | null;
   progress: { title: string; stage: string; percent: number; jobId: number } | null;
 }
@@ -124,6 +126,7 @@ export const store = reactive({
     commitDiff: null,
     credentials: null,
     identityGuide: false,
+    identityGate: false,
     error: null,
     progress: null,
   } as UiState,
@@ -377,10 +380,12 @@ export async function bootstrap() {
       await openRepo(boot.config.lastRepo);
     }
 
-    // Git 身份缺失首次引导（FR-4.2）
-    const identity = await api.getEffectiveIdentity().catch(() => null);
-    if (!identity) {
-      store.ui.identityGuide = true;
+    // 全局 Git 身份门禁（每次启动检查，FR-4.2）：全局姓名 / 邮箱缺失时强制配置，
+    // 完成前不能使用工具。仅在确认"未配置"（返回 null）时拦截；API 调用失败不拦截，
+    // 避免浏览器开发模式等场景误锁。
+    const gi = await api.getGlobalIdentity().catch(() => undefined);
+    if (gi === null) {
+      store.ui.identityGate = true;
     }
   } catch (e) {
     showError(e as Error);

@@ -12,8 +12,10 @@ const props = withDefaults(
     maximizable?: boolean;
     /** 允许拖动边框调整大小 */
     resizable?: boolean;
+    /** 标题栏 X 关闭按钮（门禁类对话框设为 false 强制用户完成输入） */
+    closable?: boolean;
   }>(),
-  { width: 560, closeOnMask: true, maximizable: false, resizable: false },
+  { width: 560, closeOnMask: true, maximizable: false, resizable: false, closable: true },
 );
 
 const emit = defineEmits<{ close: [] }>();
@@ -222,7 +224,7 @@ onBeforeUnmount(() => {
                 <path d="M9 6V4h11v11h-2" />
               </svg>
             </button>
-            <button class="dlg-close" aria-label="close" @click="emit('close')">
+            <button v-if="closable" class="dlg-close" aria-label="close" @click="emit('close')">
               <svg width="12" height="12" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round">
                 <path d="M5 5l14 14M19 5L5 19" />
               </svg>

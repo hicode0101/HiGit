@@ -4,6 +4,7 @@ import { computed, ref } from "vue";
 import { store } from "../store";
 import { api } from "../api";
 import { t } from "../i18n";
+import { isValidEmail } from "../validate";
 import DialogBase from "./DialogBase.vue";
 import IconGlyph from "./IconGlyph.vue";
 import appIcon from "../assets/icon.png";
@@ -24,14 +25,42 @@ const idName = ref("");
 const idEmail = ref("");
 const applyGlobal = ref(true);
 
+/** 邮箱非空但格式非法：禁止保存并提示 */
+const idEmailInvalid = computed(() => idEmail.value.trim() !== "" && !isValidEmail(idEmail.value));
+
 async function saveIdentity() {
-  if (!idName.value.trim() || !idEmail.value.trim()) return;
+  if (!idName.value.trim() || !idEmail.value.trim() || idEmailInvalid.value) return;
   try {
     await api.setIdentity(applyGlobal.value ? "global" : "repo", {
       name: idName.value.trim(),
       email: idEmail.value.trim(),
     });
     store.ui.identityGuide = false;
+    const { refreshIdentity } = await import("../store");
+    await refreshIdentity();
+  } catch (e) {
+    store.ui.error = { message: (e as Error).message ?? String(e), raw: "" };
+  }
+}
+
+// ---------- 全局 Git 身份门禁（每次启动检查，缺失则强制配置后才能使用） ----------
+const gateName = ref("");
+const gateEmail = ref("");
+const gateEmailInvalid = computed(
+  () => gateEmail.value.trim() !== "" && !isValidEmail(gateEmail.value),
+);
+const gateReady = computed(
+  () => !!gateName.value.trim() && !!gateEmail.value.trim() && !gateEmailInvalid.value,
+);
+
+async function saveGateIdentity() {
+  if (!gateReady.value) return;
+  try {
+    await api.setIdentity("global", {
+      name: gateName.value.trim(),
+      email: gateEmail.value.trim(),
+    });
+    store.ui.identityGate = false;
     const { refreshIdentity } = await import("../store");
     await refreshIdentity();
   } catch (e) {
@@ -125,6 +154,7 @@ function openSite() {
     <div class="form-row">
       <label>{{ t("Email") }}</label>
       <input v-model="idEmail" />
+      <span v-if="idEmailInvalid" class="invalid-hint">{{ t("Invalid email format") }}</span>
     </div>
     <label class="check">
       <input v-model="applyGlobal" type="checkbox" />
@@ -132,8 +162,43 @@ function openSite() {
     </label>
     <template #footer>
       <button class="btn" @click="store.ui.identityGuide = false">{{ t("Cancel") }}</button>
-      <button class="btn primary" :disabled="!idName.trim() || !idEmail.trim()" @click="saveIdentity">
+      <button
+        class="btn primary"
+        :disabled="!idName.trim() || !idEmail.trim() || idEmailInvalid"
+        @click="saveIdentity"
+      >
         {{ t("Save") }}
+      </button>
+    </template>
+  </DialogBase>
+
+  <!-- 全局 Git 身份门禁：启动检查到缺失时强制配置（不可关闭，保存后才能使用工具） -->
+  <DialogBase
+    :title="t('Set up Git identity')"
+    :width="440"
+    :close-on-mask="false"
+    :closable="false"
+    v-if="store.ui.identityGate"
+  >
+    <div class="hint">
+      {{
+        t(
+          "HiGit needs a global Git identity (name and email) before you can start. It is written to the global Git config and used as the default committer.",
+        )
+      }}
+    </div>
+    <div class="form-row">
+      <label>{{ t("Your Name") }}</label>
+      <input v-model="gateName" />
+    </div>
+    <div class="form-row">
+      <label>{{ t("Email") }}</label>
+      <input v-model="gateEmail" />
+      <span v-if="gateEmailInvalid" class="invalid-hint">{{ t("Invalid email format") }}</span>
+    </div>
+    <template #footer>
+      <button class="btn primary" :disabled="!gateReady" @click="saveGateIdentity">
+        {{ t("Save and start") }}
       </button>
     </template>
   </DialogBase>
@@ -292,6 +357,11 @@ kbd {
   font-size: 13px;
   color: var(--status-modified);
   margin-bottom: 14px;
+}
+
+.invalid-hint {
+  font-size: 11px;
+  color: var(--status-modified);
 }
 
 .form-row {

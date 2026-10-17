@@ -14,6 +14,7 @@ import {
   registerCloneSuccess,
 } from "../tasks";
 import { detectAuthFromUrl } from "../urlAuth";
+import { isValidEmail } from "../validate";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
 import { joinNative } from "../path";
@@ -39,9 +40,25 @@ const password = ref("");
 const keyPath = ref("");
 const rememberCred = ref(true);
 
-// Git 身份页：默认取全局身份，两栏留空时跟随全局（仓库级优先）
+// Git 身份页：姓名 / 邮箱必填，留空的字段回退全局配置（提示文案展示将采用的全局值）
 const identityName = ref("");
 const identityEmail = ref("");
+const globalId = ref<{ name: string; email: string } | null>(null);
+
+/** 邮箱非空但格式非法：禁止克隆并提示 */
+const identityEmailInvalid = computed(
+  () => identityEmail.value.trim() !== "" && !isValidEmail(identityEmail.value),
+);
+
+/** 输入留空的字段回退全局配置；解析出完整姓名邮箱才允许执行 */
+const resolvedName = computed(() => identityName.value.trim() || globalId.value?.name || "");
+const resolvedEmail = computed(() => identityEmail.value.trim() || globalId.value?.email || "");
+const identityComplete = computed(() => !!resolvedName.value && !!resolvedEmail.value);
+
+/** 认证必填：HTTPS 需用户名 + 密码 / Token；SSH 需密钥文件（克隆前无已存凭证可沿用） */
+const authComplete = computed(() =>
+  authKind.value === "ssh" ? !!keyPath.value.trim() : !!username.value.trim() && !!password.value,
+);
 
 const tabs = computed(() => [t("Repo Info"), t("Auth"), t("Git Identity")]);
 
@@ -57,7 +74,13 @@ const destPath = computed(() => {
 });
 
 const canClone = computed(
-  () => phase.value === "setup" && !!url.value.trim() && !!dest.value.trim(),
+  () =>
+    phase.value === "setup" &&
+    !!url.value.trim() &&
+    !!dest.value.trim() &&
+    identityComplete.value &&
+    !identityEmailInvalid.value &&
+    authComplete.value,
 );
 
 async function chooseDir() {
@@ -107,7 +130,7 @@ async function clone(credsOverride?: {
   percent.value = 0;
   stage.value = t("Cloning…");
   try {
-    // HTTPS 填了用户名+密码才带凭证；SSH 始终带上（密钥留空 = ssh-agent / 默认密钥）
+    // 认证必填（canClone 已保证）：HTTPS 用户名+密码；SSH 密钥文件
     const creds =
       credsOverride ??
       (authKind.value === "ssh"
@@ -170,13 +193,9 @@ async function cancel() {
 let unlisten: (() => void) | null = null;
 let unlistenLog: (() => void) | null = null;
 onMounted(async () => {
-  // Git 身份默认取全局设置中的姓名 / 邮箱（仓库级设置优先于全局）
+  // Git 身份：不预填输入框，留空的字段回退全局配置（输入框下方提示将采用的全局值）
   try {
-    const gi = await api.getGlobalIdentity();
-    if (gi) {
-      identityName.value = gi.name;
-      identityEmail.value = gi.email;
-    }
+    globalId.value = await api.getGlobalIdentity();
   } catch {
     /* ignore */
   }
@@ -216,10 +235,9 @@ async function chooseKey() {
 registerCloneSuccess(async (path) => {
   const auth =
     authKind.value === "ssh" ? { kind: "ssh" as const, username: username.value || "git", keyPath: keyPath.value } : null;
-  const identity =
-    identityName.value.trim() && identityEmail.value.trim()
-      ? { name: identityName.value.trim(), email: identityEmail.value.trim() }
-      : null;
+  const identity = identityComplete.value
+    ? { name: resolvedName.value, email: resolvedEmail.value }
+    : null;
   try {
     await api.saveRepoSettings({
       id: "",
@@ -289,11 +307,18 @@ registerCloneSuccess(async (path) => {
         <div class="form-row">
           <label>{{ t("SSH key file") }}</label>
           <div class="form-inline">
-            <input v-model="keyPath" :placeholder="t('Empty = try ssh-agent and default keys')" />
+            <input v-model="keyPath" />
             <button class="btn" @click="chooseKey">{{ t("Choose…") }}</button>
           </div>
         </div>
       </template>
+      <div v-if="!authComplete" class="hint-line invalid-hint">
+        {{
+          authKind === "ssh"
+            ? t("SSH authentication requires a key file.")
+            : t("HTTPS authentication requires a username and password / token.")
+        }}
+      </div>
     </div>
 
     <div v-show="tab === 2 && phase === 'setup'">
@@ -301,14 +326,26 @@ registerCloneSuccess(async (path) => {
         <div class="form-row">
           <label>{{ t("Your Name") }}</label>
           <input v-model="identityName" />
+          <span v-if="!identityName.trim() && globalId?.name" class="fallback-hint">
+            {{ t("Leave empty to use the global identity: {0}", { 0: globalId.name }) }}
+          </span>
         </div>
         <div class="form-row">
           <label>{{ t("Email") }}</label>
           <input v-model="identityEmail" />
+          <span v-if="identityEmailInvalid" class="invalid-hint">
+            {{ t("Invalid email format") }}
+          </span>
+          <span v-else-if="!identityEmail.trim() && globalId?.email" class="fallback-hint">
+            {{ t("Leave empty to use the global identity: {0}", { 0: globalId.email }) }}
+          </span>
         </div>
       </div>
       <div class="hint-line">
         {{ t("Used as the committer for this repository; leave both empty to follow the global identity") }}
+      </div>
+      <div v-if="!identityComplete" class="hint-line invalid-hint">
+        {{ t("Global identity is not configured. Fill in the name and email, or set them in Settings first.") }}
       </div>
     </div>
 
@@ -388,6 +425,16 @@ registerCloneSuccess(async (path) => {
   color: var(--text-tertiary);
   font-size: 12px;
   margin: -8px 0 8px;
+}
+
+.invalid-hint {
+  color: var(--status-modified);
+  font-size: 11px;
+}
+
+.fallback-hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 .identity-grid {

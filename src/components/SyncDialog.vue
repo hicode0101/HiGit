@@ -7,6 +7,7 @@ import { store, type SyncKind, showError } from "../store";
 import { api, onJobProgress, onSyncLog, replaySyncLogs } from "../api";
 import type { JobDoneEvent, SyncLogEvent, SyncPreviewDto, RepoEntryDto } from "../api/types";
 import { t } from "../i18n";
+import { isValidEmail } from "../validate";
 import { registerSyncDone, startSyncJob, type SyncCreds, type SyncJobReq } from "../tasks";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
@@ -44,6 +45,26 @@ const authTouched = ref(false);
 const identityName = ref("");
 const identityEmail = ref("");
 const identityTouched = ref(false);
+const globalId = ref<{ name: string; email: string } | null>(null);
+
+/** 邮箱非空但格式非法：禁止执行同步操作并提示 */
+const identityEmailInvalid = computed(
+  () => identityEmail.value.trim() !== "" && !isValidEmail(identityEmail.value),
+);
+
+/** 输入留空的字段回退全局配置（仓库条目已预填的值优先）；解析出完整姓名邮箱才允许执行 */
+const resolvedName = computed(() => identityName.value.trim() || globalId.value?.name || "");
+const resolvedEmail = computed(() => identityEmail.value.trim() || globalId.value?.email || "");
+const identityComplete = computed(() => !!resolvedName.value && !!resolvedEmail.value);
+
+/** 系统凭证管理器已存有该仓库的 HTTPS 凭证：密码 / Token 可留空沿用 */
+const credSaved = ref(false);
+/** 认证必填：HTTPS 需用户名 + 密码 / Token（已存凭证可沿用）；SSH 需密钥文件 */
+const authComplete = computed(() =>
+  authKind.value === "ssh"
+    ? !!keyPath.value.trim()
+    : (!!username.value.trim() && !!password.value) || credSaved.value,
+);
 
 let lastPayload: Omit<SyncJobReq, "creds" | "remember"> | null = null;
 
@@ -57,7 +78,10 @@ const canStart = computed(
   () =>
     phase.value === "setup" &&
     !noRemote.value &&
-    (mode.value === "fetch" || selected.value.length > 0),
+    (mode.value === "fetch" || selected.value.length > 0) &&
+    identityComplete.value &&
+    !identityEmailInvalid.value &&
+    authComplete.value,
 );
 const allSelected = computed(
   () =>
@@ -165,16 +189,17 @@ onMounted(async () => {
     identityName.value = entry.value.identity.name;
     identityEmail.value = entry.value.identity.email;
   } else {
+    // 不预填全局值：输入留空时回退全局配置，输入框下方提示将采用的全局值
     try {
-      const gi = await api.getGlobalIdentity();
-      if (gi) {
-        identityName.value = gi.name;
-        identityEmail.value = gi.email;
-      }
+      globalId.value = await api.getGlobalIdentity();
     } catch {
       /* ignore */
     }
   }
+  // 已存 HTTPS 凭证（密码不回显，留空沿用）：决定认证字段是否必填
+  credSaved.value = repoId.value
+    ? await api.repoCredentialSaved(repoId.value).catch(() => false)
+    : false;
 
   unlistenLog = await onSyncLog(handleLog);
   unlistenProgress = await onJobProgress((e) => {
@@ -269,8 +294,8 @@ async function doStart() {
           : entry.value?.auth ?? null,
         url: entry.value?.url ?? preview.value.url,
         identity: identityTouched.value
-          ? identityName.value.trim() && identityEmail.value.trim()
-            ? { name: identityName.value.trim(), email: identityEmail.value.trim() }
+          ? identityComplete.value
+            ? { name: resolvedName.value, email: resolvedEmail.value }
             : null
           : entry.value?.identity ?? null,
       });
@@ -511,11 +536,18 @@ onUnmounted(() => {
           <div class="form-row">
             <label>{{ t("SSH key file") }}</label>
             <div class="form-inline">
-              <input v-model="keyPath" :placeholder="t('Empty = try ssh-agent and default keys')" @input="markAuth" />
+              <input v-model="keyPath" @input="markAuth" />
               <button class="btn" @click="chooseKey">{{ t("Choose…") }}</button>
             </div>
           </div>
         </template>
+        <div v-if="!authComplete" class="hint-line invalid-hint">
+          {{
+            authKind === "ssh"
+              ? t("SSH authentication requires a key file.")
+              : t("HTTPS authentication requires a username and password / token.")
+          }}
+        </div>
       </div>
 
       <!-- Git 身份 -->
@@ -524,14 +556,26 @@ onUnmounted(() => {
           <div class="form-row">
             <label>{{ t("Your Name") }}</label>
             <input v-model="identityName" @input="markIdentity" />
+            <span v-if="!identityName.trim() && globalId?.name" class="fallback-hint">
+              {{ t("Leave empty to use the global identity: {0}", { 0: globalId.name }) }}
+            </span>
           </div>
           <div class="form-row">
             <label>{{ t("Email") }}</label>
             <input v-model="identityEmail" @input="markIdentity" />
+            <span v-if="identityEmailInvalid" class="invalid-hint">
+              {{ t("Invalid email format") }}
+            </span>
+            <span v-else-if="!identityEmail.trim() && globalId?.email" class="fallback-hint">
+              {{ t("Leave empty to use the global identity: {0}", { 0: globalId.email }) }}
+            </span>
           </div>
         </div>
         <div class="hint-line">
           {{ t("Used as the committer for this repository; leave both empty to follow the global identity") }}
+        </div>
+        <div v-if="!identityComplete" class="hint-line invalid-hint">
+          {{ t("Global identity is not configured. Fill in the name and email, or set them in Settings first.") }}
         </div>
       </div>
     </template>
@@ -747,6 +791,16 @@ onUnmounted(() => {
   color: var(--text-tertiary);
   font-size: 12px;
   margin: -8px 0 8px;
+}
+
+.invalid-hint {
+  color: var(--status-modified);
+  font-size: 11px;
+}
+
+.fallback-hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 .identity-grid {

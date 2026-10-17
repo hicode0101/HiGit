@@ -4,14 +4,13 @@ import { computed, onMounted, ref } from "vue";
 import { store, persistConfig, showError, toast } from "../store";
 import { api } from "../api";
 import { t } from "../i18n";
+import { isValidEmail } from "../validate";
 import DialogBase from "./DialogBase.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
 /** 开启代理时的默认地址（引擎只对 HTTP 代理稳定可用，socks 不建议） */
 const DEFAULT_PROXY = "http://127.0.0.1:8080";
-/** 邮箱格式：非空白@非空白.非空白（宽松校验，避免误拒合法地址） */
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** 填的是 SOCKS 地址时给出警示：引擎经系统组件处理 socks，实测与常见代理软件不兼容 */
 const socksHint = computed(
@@ -21,6 +20,11 @@ const socksHint = computed(
 );
 
 const globalIdentity = ref<{ name: string; email: string }>({ name: "", email: "" });
+
+/** 邮箱非空但格式非法：禁止保存并提示 */
+const emailInvalid = computed(
+  () => globalIdentity.value.email.trim() !== "" && !isValidEmail(globalIdentity.value.email),
+);
 
 onMounted(async () => {
   try {
@@ -45,7 +49,7 @@ async function save() {
     store.ui.error = { message: t("Name and email are required"), raw: "" };
     return;
   }
-  if (!EMAIL_RE.test(email)) {
+  if (!isValidEmail(email)) {
     store.ui.error = { message: t("Invalid email format"), raw: "" };
     return;
   }
@@ -92,6 +96,7 @@ async function save() {
       <div class="form-row">
         <label>{{ t("Email") }}</label>
         <input v-model="globalIdentity.email" />
+        <span v-if="emailInvalid" class="hint warn-hint">{{ t("Invalid email format") }}</span>
       </div>
 
       <div class="sec-title">{{ t("Network") }}</div>
@@ -115,7 +120,7 @@ async function save() {
 
     <template #footer>
       <button class="btn" @click="emit('close')">{{ t("Cancel") }}</button>
-      <button class="btn primary" @click="save">{{ t("Save") }}</button>
+      <button class="btn primary" :disabled="emailInvalid" @click="save">{{ t("Save") }}</button>
     </template>
   </DialogBase>
 </template>
