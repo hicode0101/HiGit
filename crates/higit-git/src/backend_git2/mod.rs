@@ -249,17 +249,30 @@ impl Git2Backend {
                 HigitError::new(ErrorCode::Unknown, format!("branch not found: {branch}"))
             })?;
         let is_current = local.is_head();
-        let upstream = local
-            .upstream()
-            .map_err(|_| HigitError::new(ErrorCode::NoUpstream, branch.to_string()))?;
+        let upstream = local.upstream().map_err(|_| {
+            HigitError::new(
+                ErrorCode::NoUpstream,
+                format!("分支 {branch} 未设置上游，无法拉取；请先推送一次（-u 建立上游）或在仓库设置中配置"),
+            )
+        })?;
         let up_name = upstream
             .name()
             .ok()
             .flatten()
-            .ok_or_else(|| HigitError::new(ErrorCode::NoUpstream, branch.to_string()))?;
+            .ok_or_else(|| {
+                HigitError::new(
+                    ErrorCode::NoUpstream,
+                    format!("分支 {branch} 的上游引用名无法解析，无法拉取"),
+                )
+            })?;
         let (remote_name, remote_branch) = up_name
             .split_once('/')
-            .ok_or_else(|| HigitError::new(ErrorCode::NoUpstream, up_name.to_string()))?;
+            .ok_or_else(|| {
+                HigitError::new(
+                    ErrorCode::NoUpstream,
+                    format!("上游 {up_name} 不是有效的 <远端>/<分支> 形式，无法拉取"),
+                )
+            })?;
 
         let log = |level: &str, text: String| {
             if let Some(ev) = on_event {
@@ -318,7 +331,9 @@ impl Git2Backend {
         if ahead > 0 {
             return Err(HigitError::new(
                 ErrorCode::Diverged,
-                format!("{branch} vs {up_name}"),
+                format!(
+                    "{branch} 与 {up_name} 已分叉：本地领先 {ahead} 个提交、落后 {behind} 个提交，无法快进；请先处理分叉（合并远端提交或变基）后重试"
+                ),
             ));
         }
 
@@ -2654,7 +2669,11 @@ fn map_net_err(e: git2::Error, url: &str, cancelled: bool, had_creds: bool) -> H
         });
         return HigitError::auth_failed(detail, msg);
     }
-    HigitError::new(ErrorCode::NetworkFailed, msg)
+    // 网络错误附加 libgit2 错误类别 / 错误码，便于区分 DNS / TLS / 代理 / 协议层问题
+    HigitError::new(
+        ErrorCode::NetworkFailed,
+        format!("{msg} (libgit2: class={:?} code={:?})", e.class(), e.code()),
+    )
 }
 
 /// 把 libgit2 的状态位折叠为单一 [`FileStatusKind`]。
@@ -2694,6 +2713,17 @@ fn map_status(status: Status, include_ignored: bool) -> Option<FileStatusKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_net_err_appends_libgit2_class_and_code() {
+        let e = git2::Error::from_str("failed to connect to example.com");
+        let err = map_net_err(e, "https://example.com/user/repo.git", false, true);
+        assert_eq!(err.code, ErrorCode::NetworkFailed);
+        let raw = err.raw.unwrap_or_default();
+        assert!(raw.contains("failed to connect to example.com"));
+        assert!(raw.contains("libgit2: class="));
+        assert!(raw.contains("code="));
+    }
 
     #[test]
     fn auth_detail_parses_common_urls() {
