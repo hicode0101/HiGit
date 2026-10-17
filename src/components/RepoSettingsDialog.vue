@@ -6,7 +6,7 @@ import { api } from "../api";
 import type { RepoEntryDto } from "../api/types";
 import { t } from "../i18n";
 import { detectAuthFromUrl } from "../urlAuth";
-import { isValidEmail } from "../validate";
+import { isValidEmail, isValidRepoUrl } from "../validate";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
 
@@ -48,6 +48,24 @@ const authComplete = computed(() =>
   authKind.value === "ssh"
     ? !!keyPath.value.trim()
     : (!!username.value.trim() && !!password.value) || credSaved.value,
+);
+
+/** 仓库地址必填；非空时校验格式（支持 https://、ssh:// 与 git@host:path scp 风格） */
+const urlInvalid = computed(() => url.value.trim() !== "" && !isValidRepoUrl(url.value));
+const urlComplete = computed(() => !!url.value.trim() && !urlInvalid.value);
+/** 输入框悬停提示：支持的地址格式（computed 使文案跟随语言切换刷新） */
+const urlFormatTip = computed(() =>
+  t("Supported URL formats: {0} or {1}", {
+    0: "https://github.com/xxxxxx/yyyyyy.git",
+    1: "git@github.com:xxxxxx/yyyyyy.git",
+  }),
+);
+/** 认证方式单选悬停提示：该认证方式对应的仓库地址格式 */
+const httpsUrlTip = computed(() =>
+  t("Corresponding repository URL format: {0}", { 0: "https://github.com/xxxxxx/yyyyyy.git" }),
+);
+const sshUrlTip = computed(() =>
+  t("Corresponding repository URL format: {0}", { 0: "git@github.com:xxxxxx/yyyyyy.git" }),
 );
 
 async function load() {
@@ -103,6 +121,14 @@ async function save() {
   if (!e) return;
   if (!alias.value.trim()) {
     store.ui.error = { message: t("Repository name cannot be empty"), raw: "" };
+    return;
+  }
+  if (!url.value.trim()) {
+    store.ui.error = { message: t("Repository URL cannot be empty"), raw: "" };
+    return;
+  }
+  if (urlInvalid.value) {
+    store.ui.error = { message: t("Invalid repository URL format"), raw: "" };
     return;
   }
   if (idEmailInvalid.value) {
@@ -173,16 +199,17 @@ async function save() {
         <input v-model="alias" />
       </div>
       <div class="form-row">
-        <label>{{ t("Remote repository URL") }} — {{ t("Push / pull target remote; leave empty to follow the repository git config") }}</label>
-        <input v-model="url" placeholder="https://github.com/user/repo.git" @input="onUrlInput" />
+        <label>{{ t("Remote repository URL") }} — {{ t("Push / pull target remote (required)") }}</label>
+        <input v-model="url" :title="urlFormatTip" placeholder="https://github.com/user/repo.git" @input="onUrlInput" />
+        <span v-if="urlInvalid" class="invalid-hint">{{ t("Invalid repository URL format") }}</span>
       </div>
     </div>
 
     <div v-show="tab === 1">
       <div class="form-row">
         <div class="kind-row">
-          <label class="radio"><input v-model="authKind" type="radio" value="http" /> HTTPS</label>
-          <label class="radio"><input v-model="authKind" type="radio" value="ssh" /> SSH</label>
+          <label class="radio" :title="httpsUrlTip"><input v-model="authKind" type="radio" value="http" /> HTTPS</label>
+          <label class="radio" :title="sshUrlTip"><input v-model="authKind" type="radio" value="ssh" /> SSH</label>
         </div>
       </div>
       <div class="hint-line">{{ t("Applies to pull / push / fetch of this repository") }}</div>
@@ -251,7 +278,7 @@ async function save() {
       <button class="btn" @click="emit('close')">{{ t("Cancel") }}</button>
       <button
         class="btn primary"
-        :disabled="!alias.trim() || idEmailInvalid || !identityComplete || !authComplete"
+        :disabled="!alias.trim() || !urlComplete || idEmailInvalid || !identityComplete || !authComplete"
         @click="save"
       >
         {{ t("Save") }}

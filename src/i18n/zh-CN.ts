@@ -277,12 +277,15 @@ export const zhCN: Record<string, string> = {
   "Repo Name": "仓库名称",
   "Display name (required)": "显示名称（必填）",
   "Repository name cannot be empty": "仓库名称不能为空",
+  "Repository URL cannot be empty": "仓库地址不能为空",
+  "Invalid repository URL format": "仓库地址格式不正确",
+  "Supported URL formats: {0} or {1}": "支持的地址格式：{0} 或 {1}",
+  "Corresponding repository URL format: {0}": "对应的仓库地址格式：{0}",
   "Display name (empty = directory name)": "显示名称（留空 = 目录名）",
   Authentication: "认证方式",
   "Applies to pull / push / fetch of this repository": "作用于该仓库的推送 / 拉取 / 抓取",
   "this repository": "本仓库",
-  "Push / pull target remote; leave empty to follow the repository git config":
-    "推送 / 拉取的目标远端；留空时跟随仓库 git 配置",
+  "Push / pull target remote (required)": "推送 / 拉取的目标远端（必填）",
   "Used as the commit author for this repository; leave empty to follow the global identity":
     "作为该仓库的提交作者；两栏留空时跟随全局身份",
   "Version Info": "版本信息",

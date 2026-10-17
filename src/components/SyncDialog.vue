@@ -52,6 +52,14 @@ const identityEmailInvalid = computed(
   () => identityEmail.value.trim() !== "" && !isValidEmail(identityEmail.value),
 );
 
+/** 认证方式单选悬停提示：该认证方式对应的仓库地址格式（computed 使文案跟随语言切换刷新） */
+const httpsUrlTip = computed(() =>
+  t("Corresponding repository URL format: {0}", { 0: "https://github.com/xxxxxx/yyyyyy.git" }),
+);
+const sshUrlTip = computed(() =>
+  t("Corresponding repository URL format: {0}", { 0: "git@github.com:xxxxxx/yyyyyy.git" }),
+);
+
 /** 输入留空的字段回退全局配置（仓库条目已预填的值优先）；解析出完整姓名邮箱才允许执行 */
 const resolvedName = computed(() => identityName.value.trim() || globalId.value?.name || "");
 const resolvedEmail = computed(() => identityEmail.value.trim() || globalId.value?.email || "");
@@ -511,8 +519,8 @@ onUnmounted(() => {
       <div v-show="tab === 1">
         <div class="form-row">
           <div class="kind-row">
-            <label class="check-line"><input v-model="authKind" type="radio" value="http" @change="markAuth" /> HTTPS</label>
-            <label class="check-line"><input v-model="authKind" type="radio" value="ssh" @change="markAuth" /> SSH</label>
+            <label class="check-line" :title="httpsUrlTip"><input v-model="authKind" type="radio" value="http" @change="markAuth" /> HTTPS</label>
+            <label class="check-line" :title="sshUrlTip"><input v-model="authKind" type="radio" value="ssh" @change="markAuth" /> SSH</label>
           </div>
         </div>
         <div class="hint-line">{{ t("Applies to this clone and later pull / push / fetch of this repository") }}</div>

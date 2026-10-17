@@ -14,7 +14,7 @@ import {
   registerCloneSuccess,
 } from "../tasks";
 import { detectAuthFromUrl } from "../urlAuth";
-import { isValidEmail } from "../validate";
+import { isValidEmail, isValidRepoUrl } from "../validate";
 import DialogBase from "./DialogBase.vue";
 import PasswordInput from "./PasswordInput.vue";
 import { joinNative } from "../path";
@@ -73,10 +73,28 @@ const destPath = computed(() => {
   return joinNative(dest.value, repoNameFromUrl.value);
 });
 
+/** 仓库地址非空时校验格式（支持 https://、ssh:// 与 git@host:path scp 风格） */
+const urlInvalid = computed(() => url.value.trim() !== "" && !isValidRepoUrl(url.value));
+/** 输入框悬停提示：支持的地址格式（computed 使文案跟随语言切换刷新） */
+const urlFormatTip = computed(() =>
+  t("Supported URL formats: {0} or {1}", {
+    0: "https://github.com/xxxxxx/yyyyyy.git",
+    1: "git@github.com:xxxxxx/yyyyyy.git",
+  }),
+);
+/** 认证方式单选悬停提示：该认证方式对应的仓库地址格式 */
+const httpsUrlTip = computed(() =>
+  t("Corresponding repository URL format: {0}", { 0: "https://github.com/xxxxxx/yyyyyy.git" }),
+);
+const sshUrlTip = computed(() =>
+  t("Corresponding repository URL format: {0}", { 0: "git@github.com:xxxxxx/yyyyyy.git" }),
+);
+
 const canClone = computed(
   () =>
     phase.value === "setup" &&
     !!url.value.trim() &&
+    !urlInvalid.value &&
     !!dest.value.trim() &&
     identityComplete.value &&
     !identityEmailInvalid.value &&
@@ -265,7 +283,8 @@ registerCloneSuccess(async (path) => {
     <div v-show="tab === 0 && phase === 'setup'">
       <div class="form-row">
         <label>{{ t("Repository URL") }}</label>
-        <input v-model="url" :placeholder="'https://github.com/user/repo.git'" @input="onUrlInput" />
+        <input v-model="url" :title="urlFormatTip" :placeholder="'https://github.com/user/repo.git'" @input="onUrlInput" />
+        <span v-if="urlInvalid" class="invalid-hint">{{ t("Invalid repository URL format") }}</span>
       </div>
       <div class="form-row">
         <label>{{ t("Destination directory") }}</label>
@@ -282,8 +301,8 @@ registerCloneSuccess(async (path) => {
     <div v-show="tab === 1 && phase === 'setup'">
       <div class="form-row">
         <div class="kind-row">
-          <label class="check-line"><input v-model="authKind" type="radio" value="http" /> HTTPS</label>
-          <label class="check-line"><input v-model="authKind" type="radio" value="ssh" /> SSH</label>
+          <label class="check-line" :title="httpsUrlTip"><input v-model="authKind" type="radio" value="http" /> HTTPS</label>
+          <label class="check-line" :title="sshUrlTip"><input v-model="authKind" type="radio" value="ssh" /> SSH</label>
         </div>
       </div>
       <div class="hint-line">{{ t("Applies to this clone and later pull / push / fetch of this repository") }}</div>
