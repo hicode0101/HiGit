@@ -114,10 +114,7 @@ pub fn open_in_editor(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map(|_| ())
+        linux_open(&path.to_string_lossy())
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
@@ -128,7 +125,8 @@ pub fn open_in_editor(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// 在系统文件管理器中显示目录（FR-10.5）：Windows 资源管理器 / macOS Finder 高亮 / Linux xdg-open。
+/// 在系统文件管理器中打开目录（FR-10.5）：Windows 资源管理器 / macOS Finder 进入该目录 /
+/// Linux gio open → 按桌面环境与常见文件管理器逐个回退 → xdg-open。仅接收目录路径。
 pub fn reveal_in_explorer(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -139,15 +137,55 @@ pub fn reveal_in_explorer(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
+        // open <dir> = Finder 进入该目录（与 Windows explorer 行为一致；open -R 是打开
+        // 父目录并高亮，与「打开所在文件夹」语义不符）
         std::process::Command::new("open")
-            .args(["-R", &path.to_string_lossy()])
+            .arg(path)
             .spawn()
             .map(|_| ())
     }
     #[cfg(target_os = "linux")]
     {
+        let target = path.to_string_lossy().to_string();
+        // 1) gio open：尊重用户默认文件管理器；glib2 随附几乎必有；失败只返回非零，
+        //    不会像 xdg-open（XFCE 上委托 exo-open）那样弹系统错误框
+        if let Ok(st) = std::process::Command::new("gio").arg("open").arg(&target).status() {
+            if st.success() {
+                return Ok(());
+            }
+        }
+        // 2) 桌面环境专属 + 常见文件管理器逐个尝试：xdg-open 默认关联损坏
+        //    （如「Failed to execute default File Manager」）时仍能打开
+        let de = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
+        let mut candidates: Vec<&str> = Vec::new();
+        if de.contains("gnome") {
+            candidates.push("nautilus");
+        } else if de.contains("kde") {
+            candidates.push("dolphin");
+        } else if de.contains("xfce") {
+            candidates.push("thunar");
+        } else if de.contains("mate") {
+            candidates.push("caja");
+        } else if de.contains("x-cinnamon") {
+            candidates.push("nemo");
+        } else if de.contains("lxqt") {
+            candidates.push("pcmanfm-qt");
+        }
+        for prog in ["nautilus", "dolphin", "thunar", "caja", "nemo", "pcmanfm-qt", "pcmanfm"] {
+            if !candidates.contains(&prog) {
+                candidates.push(prog);
+            }
+        }
+        for prog in &candidates {
+            if std::process::Command::new(prog).arg(&target).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        // 3) 最后兜底 xdg-open（无 gio 且无已知文件管理器时的最后尝试）
         std::process::Command::new("xdg-open")
-            .arg(path.to_string_lossy().to_string())
+            .arg(&target)
             .spawn()
             .map(|_| ())
     }
@@ -158,6 +196,17 @@ pub fn reveal_in_explorer(path: &Path) -> std::io::Result<()> {
             "no file manager launcher for this platform",
         ))
     }
+}
+
+/// Linux 通用打开（gio open 优先，失败回退 xdg-open）：默认编辑器 / 浏览器共用。
+#[cfg(target_os = "linux")]
+fn linux_open(target: &str) -> std::io::Result<()> {
+    if let Ok(st) = std::process::Command::new("gio").arg("open").arg(target).status() {
+        if st.success() {
+            return Ok(());
+        }
+    }
+    std::process::Command::new("xdg-open").arg(target).spawn().map(|_| ())
 }
 
 /// 用系统默认浏览器打开 URL（关于对话框官网链接）。
@@ -178,10 +227,7 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
+        linux_open(url)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
