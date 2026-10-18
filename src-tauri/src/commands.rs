@@ -13,7 +13,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use higit_core::credentials as cred_store;
 use higit_core::gitignore;
 use higit_git::engine::{
-    CancelToken, CloneRequest, Credentials, GitEngine, Progress, PushRequest, SyncEvent,
+    CancelToken, CloneRequest, Credentials, GitEngine, Progress, PullOptions, PushRequest,
+    SyncEvent,
 };
 use higit_git::error::ErrorCode;
 use higit_git::model::{DiffSpec, FileStatusKind, Identity, IdentityScope, StatusOpts};
@@ -985,15 +986,28 @@ pub async fn commit(
     amend: bool,
     // 按路径提交（提交对话框勾选语义）：仅提交这些路径（None/空 = 提交整个暂存区）
     paths: Option<Vec<String>>,
+    // 提交到新分支（提交对话框勾选）：在 HEAD 处建分支并切换后提交，原分支不动
+    new_branch: Option<String>,
 ) -> CmdResult<String> {
     run_blocking(move || {
         let state = app.state::<AppState>();
         with_session(&state, |state, h| {
             let author = commit_identity(state, &h.path);
+            // 新分支：与 HEAD 同树，仅移动 HEAD 符号引用，无需检出文件
+            if let Some(nb) = new_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                state.engine.create_branch(&h.session, nb, None)?;
+                state.engine.switch_head(&h.session, nb)?;
+            }
             let oid = if amend {
-                state
-                    .engine
-                    .commit_amend(&h.session, &message, author.as_ref())?
+                if let Some(paths) = paths.filter(|p| !p.is_empty()) {
+                    state
+                        .engine
+                        .commit_amend_partial(&h.session, &message, author.as_ref(), &paths)?
+                } else {
+                    state
+                        .engine
+                        .commit_amend(&h.session, &message, author.as_ref())?
+                }
             } else if let Some(paths) = paths.filter(|p| !p.is_empty()) {
                 state
                     .engine
@@ -1023,6 +1037,10 @@ pub struct CommitFileDto {
     pub size: Option<u64>,
     /// 磁盘最后修改时间（Unix 秒；已删除为 null）
     pub mtime_unix: Option<i64>,
+    /// 相对 HEAD 的新增行数（二进制 / 文件过多未统计为 null）
+    pub additions: Option<u32>,
+    /// 相对 HEAD 的删除行数
+    pub deletions: Option<u32>,
 }
 
 /// 提交对话框数据：仓库信息 + 提交者 + 变更文件列表。
@@ -1042,9 +1060,15 @@ pub async fn commit_preview(app: AppHandle, rel: String) -> CmdResult<CommitPrev
     run_blocking(move || {
         let state = app.state::<AppState>();
         with_session(&state, |state, h| {
-            let files = state
-                .engine
-                .commit_preview(&h.session, &rel)?
+            let mut files = state.engine.commit_preview(&h.session, &rel)?;
+            // 行级变更统计（+行 / -行）；文件过多时引擎侧整体返回 None
+            let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+            let stats = state.engine.change_stats(&h.session, &paths)?;
+            for (f, (a, d)) in files.iter_mut().zip(stats) {
+                f.additions = a;
+                f.deletions = d;
+            }
+            let files = files
                 .into_iter()
                 .map(|f| CommitFileDto {
                     path: f.path,
@@ -1052,6 +1076,8 @@ pub async fn commit_preview(app: AppHandle, rel: String) -> CmdResult<CommitPrev
                     staged: f.staged,
                     size: f.size,
                     mtime_unix: f.mtime_unix,
+                    additions: f.additions,
+                    deletions: f.deletions,
                 })
                 .collect();
             // 提交者展示链与提交命令一致：仓库设置 → git 配置（仓库级 → 全局）
@@ -1619,6 +1645,43 @@ pub struct SyncStartReq {
     pub creds: Option<CredsDto>,
     #[serde(default)]
     pub remember: bool,
+    /// pull：TortoiseGit 式拉取选项（缺省 = 快进优先、分叉报错、不 prune）
+    #[serde(default)]
+    pub pull_opts: Option<PullOptsDto>,
+}
+
+/// 拉取选项（FR-5.1 扩展，拉取对话框提交）
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullOptsDto {
+    #[serde(default)]
+    pub rebase: bool,
+    #[serde(default)]
+    pub no_ff: bool,
+    #[serde(default)]
+    pub ff_only: bool,
+    #[serde(default)]
+    pub no_commit: bool,
+    #[serde(default)]
+    pub squash: bool,
+    #[serde(default)]
+    pub all_tags: bool,
+    #[serde(default)]
+    pub prune: bool,
+}
+
+impl PullOptsDto {
+    pub fn to_model(&self) -> PullOptions {
+        PullOptions {
+            rebase: self.rebase,
+            no_ff: self.no_ff,
+            ff_only: self.ff_only,
+            no_commit: self.no_commit,
+            squash: self.squash,
+            all_tags: self.all_tags,
+            prune: self.prune,
+        }
+    }
 }
 
 // ---------- 出网方式 / 认证方式 / 阶段说明（同步与克隆日志共用） ----------
@@ -2024,12 +2087,25 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                     Ok(serde_json::json!({}))
                 }
                 "pull" => {
-                    let o = state
-                        .engine
-                        .pull_verbose(&h.session, &branch, creds, &on_event, &cancel)?;
+                    let o = state.engine.pull_options(
+                        &h.session,
+                        &branch,
+                        &req.pull_opts
+                            .as_ref()
+                            .map(|p| p.to_model())
+                            .unwrap_or_default(),
+                        creds,
+                        None,
+                        Some(&on_event),
+                        &cancel,
+                    )?;
                     Ok(serde_json::json!({
                         "updated": o.updated,
                         "headShortId": o.head.map(|x| x.short_id).unwrap_or_default(),
+                        "fastForward": o.fast_forward,
+                        "rebased": o.rebased,
+                        "pendingCommit": o.pending_commit,
+                        "conflicts": o.conflicts.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect::<Vec<_>>(),
                     }))
                 }
                 _ => {
@@ -2075,12 +2151,61 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                     "pull" => {
                         let updated = v.get("updated").and_then(|x| x.as_bool()).unwrap_or(false);
                         let short = v.get("headShortId").and_then(|x| x.as_str()).unwrap_or("");
-                        if updated && !short.is_empty() {
+                        let rebased = v.get("rebased").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let ff = v.get("fastForward").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let pending =
+                            v.get("pendingCommit").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let conflicts: Vec<String> = v
+                            .get("conflicts")
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !conflicts.is_empty() {
+                            emit_log(
+                                "warn",
+                                lz(
+                                    &format!(
+                                        "合并被冲突阻断（{} 个文件），解决后在变更页提交",
+                                        conflicts.len()
+                                    ),
+                                    &format!(
+                                        "Merge blocked by conflicts ({} file(s)); resolve and commit",
+                                        conflicts.len()
+                                    ),
+                                ),
+                            );
+                        } else if pending {
                             emit_log(
                                 "ok",
                                 lz(
-                                    &format!("已更新到 {short}（耗时 {elapsed} ms）"),
-                                    &format!("Updated to {short} ({elapsed} ms)"),
+                                    "合并已就绪但未自动提交，请检查后提交",
+                                    "Merge is ready but not committed; commit manually",
+                                ),
+                            );
+                        } else if rebased > 0 {
+                            emit_log(
+                                "ok",
+                                lz(
+                                    &format!("已变基 {rebased} 个提交 → {short}（耗时 {elapsed} ms）"),
+                                    &format!("Rebased {rebased} commit(s) -> {short} ({elapsed} ms)"),
+                                ),
+                            );
+                        } else if updated && !short.is_empty() {
+                            emit_log(
+                                "ok",
+                                lz(
+                                    &format!(
+                                        "{} {short}（耗时 {elapsed} ms）",
+                                        if ff { "已快进" } else { "已更新到" }
+                                    ),
+                                    &format!(
+                                        "{} {short} ({elapsed} ms)",
+                                        if ff { "Fast-forwarded to" } else { "Updated to" }
+                                    ),
                                 ),
                             );
                         } else {
@@ -2460,6 +2585,35 @@ pub async fn branch_checkout(app: AppHandle, name: String) -> CmdResult<StatusDt
 }
 
 #[tauri::command]
+pub async fn list_tags(app: AppHandle) -> CmdResult<Vec<TagDto>> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        with_session(&state, |_state, h| {
+            let list = state.engine.tags(&h.session)?;
+            Ok(list.iter().map(TagDto::from_model).collect())
+        })
+    })
+    .await
+}
+
+/// 增强检出（FR-7.5）：分支/标签/提交 + TortoiseGit 式选项（切换分支对话框提交）
+#[tauri::command]
+pub async fn checkout_target(
+    app: AppHandle,
+    opts: CheckoutOptsDto,
+) -> CmdResult<CheckoutOutcomeDto> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        with_session(&state, |state, h| {
+            let o = state.engine.checkout(&h.session, &opts.to_model())?;
+            let _ = status_dto(state, h);
+            Ok(CheckoutOutcomeDto::from_model(&o))
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn branch_rename(app: AppHandle, old: String, new: String) -> CmdResult<()> {
     run_blocking(move || {
         let state = app.state::<AppState>();
@@ -2491,6 +2645,20 @@ pub async fn branch_merge(app: AppHandle, name: String) -> CmdResult<MergeOutcom
             let o = state.engine.merge_branch(&h.session, &name)?;
             let _ = status_dto(state, h);
             Ok(MergeOutcomeDto::from_model(&o))
+        })
+    })
+    .await
+}
+
+/// 增强合并（FR-7.6）：分支/标签/提交来源 + TortoiseGit 式选项（合并分支对话框提交）
+#[tauri::command]
+pub async fn merge_target(app: AppHandle, opts: MergeOptsDto) -> CmdResult<MergeResultDto> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        with_session(&state, |state, h| {
+            let r = state.engine.merge(&h.session, &opts.to_model())?;
+            let _ = status_dto(state, h);
+            Ok(MergeResultDto::from_model(&r))
         })
     })
     .await

@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{HigitError, Result};
 use crate::model::{
-    BranchInfo, CleanOptions, CleanOutcome, CommitDetail, CommitEntry, DiffSpec, HeadInfo,
-    Identity, IdentityScope, MergeOutcome, RepoStatus, StatusOpts, TextDiff,
+    BranchInfo, CheckoutOptions, CheckoutOutcome, CleanOptions, CleanOutcome, CommitDetail,
+    CommitEntry, DiffSpec, HeadInfo, Identity, IdentityScope, MergeOptions, MergeOutcome,
+    MergeResult, RepoStatus, StatusOpts, TagInfo, TextDiff,
 };
 
 /// 长任务取消令牌。
@@ -192,6 +193,48 @@ pub struct PullOutcome {
     pub updated: bool,
     /// 快进后的 HEAD（updated=true 时必有）
     pub head: Option<HeadInfo>,
+    /// 是否以快进方式完成
+    pub fast_forward: bool,
+    /// 变基模式：重放的本地提交数
+    pub rebased: u32,
+    /// 合并完成但未创建提交（--no-commit / --squash）：等待用户手动提交
+    pub pending_commit: bool,
+    /// 合并被冲突阻断：冲突文件列表（仓库保留冲突状态待解决）
+    pub conflicts: Vec<PathBuf>,
+}
+
+/// 拉取选项（FR-5.1 扩展，对应 TortoiseGit Pull 对话框）。
+/// 手动实现 Default 以保持既有拉取行为（快进优先、分叉报错、不 prune）。
+#[derive(Debug, Clone)]
+pub struct PullOptions {
+    /// 变基整合（git pull --rebase）：本地提交重放到远端最新提交之上
+    pub rebase: bool,
+    /// 禁用快进：总是产生合并提交（git pull --no-ff）
+    pub no_ff: bool,
+    /// 仅允许快进：分叉时报错（git pull --ff-only）
+    pub ff_only: bool,
+    /// 合并后不自动创建合并提交（git pull --no-commit）
+    pub no_commit: bool,
+    /// 压缩合并（git pull --squash）：变更进入暂存区，不建合并提交
+    pub squash: bool,
+    /// 同时抓取所有标签（git fetch --tags）；false = 仅抓取可达标签（git 默认）
+    pub all_tags: bool,
+    /// 抓取时清理已被远端删除的远端跟踪分支（git fetch --prune）
+    pub prune: bool,
+}
+
+impl Default for PullOptions {
+    fn default() -> Self {
+        Self {
+            rebase: false,
+            no_ff: false,
+            ff_only: true,
+            no_commit: false,
+            squash: false,
+            all_tags: false,
+            prune: false,
+        }
+    }
 }
 
 /// 提交对话框的变更文件行：工作区全部变更（含未暂存），勾选即提交。
@@ -207,6 +250,10 @@ pub struct ChangeFileInfo {
     pub size: Option<u64>,
     /// 磁盘最后修改时间（Unix 秒；已删除文件为 None）
     pub mtime_unix: Option<i64>,
+    /// 相对 HEAD 的行级统计：新增行数（二进制 / 统计被跳过时为 None）
+    pub additions: Option<u32>,
+    /// 相对 HEAD 的行级统计：删除行数
+    pub deletions: Option<u32>,
 }
 
 /// 同步 Git 操作引擎（含网络长任务；实现方必须支持进度上报与取消，FR-5.10）。
@@ -323,6 +370,22 @@ pub trait GitEngine: Send + Sync {
         Err(HigitError::not_implemented("pull_verbose"))
     }
 
+    /// 增强拉取（FR-5.1 扩展）：fetch（可带 --prune / --tags）后按选项整合——
+    /// 快进 / 合并（--no-ff / --ff-only / --no-commit / --squash）或变基（--rebase）。
+    #[allow(clippy::too_many_arguments)]
+    fn pull_options(
+        &self,
+        _session: &RepoSession,
+        _branch: &str,
+        _opts: &PullOptions,
+        _creds: Option<&Credentials>,
+        _progress: Option<&dyn Fn(Progress)>,
+        _on_event: Option<&(dyn Fn(SyncEvent) + Send + Sync)>,
+        _cancel: &CancelToken,
+    ) -> Result<PullOutcome> {
+        Err(HigitError::not_implemented("pull_options"))
+    }
+
     /// 设置网络代理（FR-10.4）：`None`/空串 = 直连；URL 原样交给 libgit2——Windows 上
     /// 经系统 WinHTTP 处理（`socks*://` 与常见代理软件不兼容，仅 HTTP 代理稳定可用），
     /// 非 Windows 的 libgit2 自带客户端无 SOCKS 实现。建议一律使用 `http(s)://` 代理地址。
@@ -386,6 +449,34 @@ pub trait GitEngine: Send + Sync {
         _paths: &[String],
     ) -> Result<String> {
         Err(HigitError::not_implemented("commit_partial"))
+    }
+
+    /// 提交对话框的行级变更统计：按 `paths` 逐文件返回 (+行数, -行数)，
+    /// 相对 HEAD（含索引变更）；二进制 / 无法统计为 None。文件过多时整体返回 None。
+    fn change_stats(
+        &self,
+        _session: &RepoSession,
+        _paths: &[String],
+    ) -> Result<Vec<(Option<u32>, Option<u32>)>> {
+        Err(HigitError::not_implemented("change_stats"))
+    }
+
+    /// 按路径修补上一次提交（提交对话框 Amend + 勾选语义）：提交树 = HEAD 树 +
+    /// 这些路径的最新暂存内容，父提交沿用原提交（合并提交修补后仍为合并提交）。
+    fn commit_amend_partial(
+        &self,
+        _session: &RepoSession,
+        _message: &str,
+        _author: Option<&Identity>,
+        _paths: &[String],
+    ) -> Result<String> {
+        Err(HigitError::not_implemented("commit_amend_partial"))
+    }
+
+    /// 仅移动 HEAD 符号引用到指定本地分支（不更新工作区 / 索引）。
+    /// 供"提交到新分支"使用：新分支与 HEAD 同树，无需检出任何文件。
+    fn switch_head(&self, _session: &RepoSession, _branch: &str) -> Result<()> {
+        Err(HigitError::not_implemented("switch_head"))
     }
 
     /// 单文件文本差异（FR-8.1）；路径相对仓库根。
@@ -478,6 +569,17 @@ pub trait GitEngine: Send + Sync {
         Err(HigitError::not_implemented("checkout_branch"))
     }
 
+    /// 标签列表（FR-7.5）：轻量与附注标签统一解析，按目标提交时间倒序。
+    fn tags(&self, _session: &RepoSession) -> Result<Vec<TagInfo>> {
+        Err(HigitError::not_implemented("tags"))
+    }
+
+    /// 增强检出（FR-7.5）：目标支持分支（本地/远端）/ 标签 / 提交，附 TortoiseGit 式
+    /// 选项：新建分支、强制、合并本地修改（-m）、跟踪远端分支、覆盖已存在分支。
+    fn checkout(&self, _session: &RepoSession, _opts: &CheckoutOptions) -> Result<CheckoutOutcome> {
+        Err(HigitError::not_implemented("checkout"))
+    }
+
     /// 重命名分支（FR-7.3）；若为当前分支 HEAD 自动跟随。
     fn rename_branch(&self, _session: &RepoSession, _old: &str, _new: &str) -> Result<()> {
         Err(HigitError::not_implemented("rename_branch"))
@@ -492,5 +594,12 @@ pub trait GitEngine: Send + Sync {
     /// 冲突时阻断并列出冲突文件（FR-5.8 P0），仓库保留冲突状态待解决后提交。
     fn merge_branch(&self, _session: &RepoSession, _name: &str) -> Result<MergeOutcome> {
         Err(HigitError::not_implemented("merge_branch"))
+    }
+
+    /// 增强合并（FR-7.6）：来源支持分支（本地/远端）/ 标签 / 提交，附 TortoiseGit 式
+    /// 选项：--no-ff / --ff-only / --no-commit / --squash、自定义提交消息、
+    /// 附加日志消息（merge.log）、-s ours 策略。
+    fn merge(&self, _session: &RepoSession, _opts: &MergeOptions) -> Result<MergeResult> {
+        Err(HigitError::not_implemented("merge"))
     }
 }

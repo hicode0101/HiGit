@@ -29,7 +29,8 @@ import SyncDialog from "./components/SyncDialog.vue";
 import CommitDialog from "./components/CommitDialog.vue";
 import DiscardDialog from "./components/DiscardDialog.vue";
 import CleanDialog from "./components/CleanDialog.vue";
-import BranchPickerDialog from "./components/BranchPickerDialog.vue";
+import CheckoutDialog from "./components/CheckoutDialog.vue";
+import MergeDialog from "./components/MergeDialog.vue";
 import BranchesDialog from "./components/BranchesDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import RepoSettingsDialog from "./components/RepoSettingsDialog.vue";
@@ -189,7 +190,8 @@ function suppressNativeContextMenu(e: MouseEvent) {
     <CommitDialog v-if="store.ui.commitDialog" @close="store.ui.commitDialog = false" />
     <DiscardDialog v-if="store.ui.discard" @close="store.ui.discard = null" />
     <CleanDialog v-if="store.ui.clean" @close="store.ui.clean = false" />
-    <BranchPickerDialog v-if="store.ui.branchOp" @close="store.ui.branchOp = null" />
+    <CheckoutDialog v-if="store.ui.branchOp === 'switch'" @close="store.ui.branchOp = null" />
+    <MergeDialog v-if="store.ui.branchOp === 'merge'" @close="store.ui.branchOp = null" />
     <BranchesDialog v-if="store.ui.branches" @close="store.ui.branches = false" />
     <SettingsDialog v-if="store.ui.settings" @close="store.ui.settings = false" />
     <RepoSettingsDialog

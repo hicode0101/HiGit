@@ -22,16 +22,20 @@ use git2::{
 const DIFF_TEXT_MAX_BYTES: u64 = 1024 * 1024;
 /// diff 行数展示上限（超出截断，FR-8.4）
 const DIFF_LINE_CAP: usize = 4000;
+/// 提交对话框行级统计的文件数上限：超过则整体跳过（性能保护）
+const COMMIT_STATS_MAX_FILES: usize = 200;
 
 use crate::engine::{
     CancelToken, ChangeFileInfo, CloneRequest, Credentials, FetchUpdate, GitEngine, Progress,
-    PullOutcome, PushOutcome, PushPreview, PushRequest, RepoSession, SessionInner, SyncEvent,
+    PullOptions, PullOutcome, PushRequest, PushPreview, PushOutcome, RepoSession, SessionInner,
+    SyncEvent,
 };
 use crate::error::{AuthDetail, AuthKind, ErrorCode, HigitError, Result};
 use crate::model::{
-    BranchInfo, CleanMode, CleanOptions, CleanOutcome, CommitDetail, CommitEntry, CommitFile,
-    CommitFileKind, DiffLine, DiffLineOrigin, DiffSpec, FileEntry, FileStatusKind, HeadInfo,
-    Identity, IdentityScope, MergeOutcome, RepoStatus, StatusOpts, TextDiff,
+    BranchInfo, CheckoutOptions, CheckoutOutcome, CheckoutTargetKind, CleanMode, CleanOptions,
+    CleanOutcome, CommitDetail, CommitEntry, CommitFile, CommitFileKind, DiffLine, DiffLineOrigin,
+    DiffSpec, FileEntry, FileStatusKind, HeadInfo, Identity, IdentityScope, MergeOptions,
+    MergeOutcome, MergeResult, RepoStatus, StatusOpts, TagInfo, TextDiff,
 };
 
 mod ssh;
@@ -66,6 +70,17 @@ impl Git2Backend {
         let SessionInner::Git2(s) = &session.inner;
         let repo = s.repo.lock().expect("git2 session mutex poisoned");
         f(s, &repo)
+    }
+
+    /// 同 with_session，但提供 `&mut Repository`（stash 等 libgit2 可变 API 需要）。
+    fn with_session_mut<T>(
+        &self,
+        session: &RepoSession,
+        f: impl FnOnce(&Git2Session, &mut Repository) -> Result<T>,
+    ) -> Result<T> {
+        let SessionInner::Git2(s) = &session.inner;
+        let mut repo = s.repo.lock().expect("git2 session mutex poisoned");
+        f(s, &mut repo)
     }
 
     /// 网络回调（详细日志版）：进度可路由到简单 progress 或 [`SyncEvent`]；
@@ -230,25 +245,29 @@ impl Git2Backend {
     }
 
     /// 拉取实现：plain pull 与 pull_verbose 共用（on_event 有值时输出详细日志）。
-    fn pull_impl(
+    /// 拉取第 1 阶段：解析上游 → 抓取（可带 --prune / --tags）→ 计算本地/远端关系，
+    /// 决定整合方案（快进 / 合并 / 变基 / 已最新 / 分叉报错）。
+    #[allow(clippy::too_many_arguments)]
+    fn pull_fetch_plan(
         &self,
         repo: &Repository,
         branch: &str,
+        opts: &PullOptions,
         creds: Option<&Credentials>,
         progress: Option<&dyn Fn(Progress)>,
         on_event: Option<&(dyn Fn(SyncEvent) + Send + Sync)>,
         cancel: &CancelToken,
-    ) -> Result<PullOutcome> {
+    ) -> Result<PullPlan> {
         let branch = branch.trim();
         if branch.is_empty() {
             return Err(HigitError::new(ErrorCode::Unknown, "no branch to pull"));
         }
+        let log = sync_logger(on_event);
         let local = repo
             .find_branch(branch, git2::BranchType::Local)
             .map_err(|_| {
                 HigitError::new(ErrorCode::Unknown, format!("branch not found: {branch}"))
             })?;
-        let is_current = local.is_head();
         let upstream = local.upstream().map_err(|_| {
             HigitError::new(
                 ErrorCode::NoUpstream,
@@ -274,16 +293,7 @@ impl Git2Backend {
                 )
             })?;
 
-        let log = |level: &str, text: String| {
-            if let Some(ev) = on_event {
-                ev(SyncEvent::Log {
-                    level: level.to_string(),
-                    text,
-                });
-            }
-        };
-
-        // 仅抓取当前分支的上游 refspec
+        // 仅抓取当前分支的上游 refspec（可附 --tags）
         let mut r = repo
             .find_remote(remote_name)
             .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?;
@@ -295,14 +305,28 @@ impl Git2Backend {
         log("dim", format!("远端: {url}"));
         let auth = on_event.map(AuthLog::new);
         let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
-        let mut opts = git2::FetchOptions::new();
-        opts.remote_callbacks(cbs);
+        let mut fopts = git2::FetchOptions::new();
+        fopts.remote_callbacks(cbs);
         if let Some(px) = self.proxy_opts() {
-            opts.proxy_options(px);
+            fopts.proxy_options(px);
         }
-        let spec =
-            format!("+refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
-        r.fetch(std::slice::from_ref(&spec), Some(&mut opts), None)
+        if opts.prune {
+            fopts.prune(FetchPrune::On);
+            log("dim", "fetch --prune".into());
+        }
+        let mut specs = vec![format!(
+            "+refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}"
+        )];
+        if opts.prune {
+            // prune 生效范围覆盖整个远端：同时刷新全部远端跟踪引用，
+            // 清理所有已被远端删除的分支（仅限当前分支 refspec 时 prune 无内容可清理）
+            specs.push(format!("+refs/heads/*:refs/remotes/{remote_name}/*"));
+        }
+        if opts.all_tags {
+            specs.push("+refs/tags/*:refs/tags/*".to_string());
+            log("dim", "fetch --tags".into());
+        }
+        r.fetch(&specs, Some(&mut fopts), None)
             .map_err(|e| map_net_err(e, &url, cancel.is_cancelled(), creds.is_some()))?;
         if let Some(a) = auth.as_ref() {
             a.succeed();
@@ -316,19 +340,20 @@ impl Git2Backend {
             .find_reference(&format!("refs/remotes/{remote_name}/{remote_branch}"))
             .map_err(|e| HigitError::new(ErrorCode::NoUpstream, e.message()))?;
         let Some(up_oid) = up_ref.target() else {
-            return Ok(PullOutcome::default());
+            return Ok(PullPlan::UpToDate);
         };
         if local_oid == up_oid {
-            return Ok(PullOutcome::default());
+            return Ok(PullPlan::UpToDate);
         }
         let (ahead, behind) = repo
             .graph_ahead_behind(local_oid, up_oid)
             .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
         if behind == 0 {
             // 本地领先或对等：无需更新
-            return Ok(PullOutcome::default());
+            return Ok(PullPlan::UpToDate);
         }
-        if ahead > 0 {
+        let ff_able = ahead == 0;
+        if opts.ff_only && !ff_able {
             return Err(HigitError::new(
                 ErrorCode::Diverged,
                 format!(
@@ -336,9 +361,34 @@ impl Git2Backend {
                 ),
             ));
         }
+        if ff_able {
+            // no_ff / squash 需要产生合并动作（squash 不移动分支引用）
+            if opts.no_ff || opts.squash {
+                return Ok(PullPlan::Merge { up_name: up_name.to_string() });
+            }
+            return Ok(PullPlan::FastForward { up_oid, up_name: up_name.to_string() });
+        }
+        if opts.rebase {
+            return Ok(PullPlan::Rebase {
+                up_name: up_name.to_string(),
+                up_oid,
+            });
+        }
+        Ok(PullPlan::Merge {
+            up_name: up_name.to_string(),
+        })
+    }
 
-        // 快进：当前分支先安全 checkout（不覆盖未提交修改）→ 前移分支引用；
-        // 非当前分支仅前移引用（无工作区变更）
+    /// 拉取第 2 阶段（快进）：当前分支先安全 checkout（不覆盖未提交修改）→ 前移分支引用；
+    /// 非当前分支仅前移引用（无工作区变更）。
+    fn pull_fast_forward(
+        &self,
+        repo: &Repository,
+        branch: &str,
+        up_oid: Oid,
+        up_name: &str,
+        log: &dyn Fn(&str, String),
+    ) -> Result<PullOutcome> {
         let commit = repo
             .find_commit(up_oid)
             .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
@@ -349,7 +399,11 @@ impl Git2Backend {
                 up_oid.to_string().chars().take(7).collect::<String>()
             ),
         );
-        if is_current {
+        if repo
+            .find_branch(branch, git2::BranchType::Local)
+            .map(|b| b.is_head())
+            .unwrap_or(false)
+        {
             repo.checkout_tree(commit.as_object(), None).map_err(|e| {
                 HigitError::new(
                     ErrorCode::DirtyWorktree,
@@ -361,22 +415,92 @@ impl Git2Backend {
             .find_reference(&format!("refs/heads/{branch}"))
             .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
         local_ref
-            .set_target(up_oid, "pull: fast-forward")
+            .set_target(up_oid, &format!("pull: fast-forward to {up_name}"))
             .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
 
         Ok(PullOutcome {
             updated: true,
-            head: Some(HeadInfo {
-                short_id: up_oid.to_string().chars().take(7).collect(),
-                summary: commit
-                    .summary()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .to_string(),
-                time_unix: commit.time().seconds(),
-                committer_email: commit.committer().email().unwrap_or("").to_string(),
-            }),
+            head: Some(head_info_of(repo)?),
+            fast_forward: true,
+            ..Default::default()
+        })
+    }
+
+    /// 拉取第 2 阶段（变基，git pull --rebase）：把本地提交重放到远端最新提交之上。
+    /// 冲突时中止变基并恢复原状（轻量客户端不提供交互式变基，错误中说明）。
+    fn pull_rebase(
+        &self,
+        repo: &Repository,
+        branch: &str,
+        up_name: &str,
+        up_oid: Oid,
+        log: &dyn Fn(&str, String),
+    ) -> Result<PullOutcome> {
+        let sig = merge_signature(repo)?;
+        let onto = repo
+            .find_annotated_commit(up_oid)
+            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+        log(
+            "info",
+            format!(
+                "rebase {branch} onto {up_name} ({})",
+                up_oid.to_string().chars().take(7).collect::<String>()
+            ),
+        );
+        let mut rb = repo
+            .rebase(None, Some(&onto), None, None)
+            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+        let mut rebased: u32 = 0;
+        loop {
+            match rb.next() {
+                Some(Ok(_op)) => {
+                    // libgit2 应用冲突时 next() 可能不报错，而是把冲突写进索引
+                    let conflicted = repo.index().map(|i| i.has_conflicts()).unwrap_or(false);
+                    if conflicted {
+                        let _ = rb.abort();
+                        return Err(HigitError::new(
+                            ErrorCode::MergeConflict,
+                            format!(
+                                "rebase conflict while replaying commits onto {up_name}; rebase aborted and original branch restored"
+                            ),
+                        ));
+                    }
+                    match rb.commit(None, &sig, None) {
+                        // author / message 传 None = 沿用原提交
+                        Ok(_) => rebased += 1,
+                        Err(e) => {
+                            let _ = rb.abort();
+                            return Err(HigitError::new(
+                                ErrorCode::Unknown,
+                                format!("rebase failed at commit {rebased}: {}; original branch restored", e.message()),
+                            ));
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    // 冲突：中止变基恢复原状，提示改用合并或手动变基
+                    let _ = rb.abort();
+                    return Err(HigitError::new(
+                        ErrorCode::MergeConflict,
+                        format!(
+                            "rebase conflict while replaying commits onto {up_name}: {}; rebase aborted and original branch restored",
+                            e.message()
+                        ),
+                    ));
+                }
+                None => break,
+            }
+        }
+        rb.finish(Some(&sig))
+            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+        log("ok", format!("rebased {rebased} commit(s) onto {up_name}"));
+        Ok(PullOutcome {
+            updated: true,
+            head: Some(head_info_of(repo)?),
+            fast_forward: false,
+            rebased,
+            pending_commit: false,
+            conflicts: Vec::new(),
         })
     }
 }
@@ -925,7 +1049,7 @@ impl GitEngine for Git2Backend {
 
     /// 拉取（FR-5.1）：fetch 指定分支的上游 + 快进合并该分支。
     /// 分叉（双方均有新提交）返回 `Diverged`；安全模式下若与未提交修改冲突则拒绝覆盖。
-    /// 分支非当前检出时仅前移本地引用，不更新工作区。
+    /// 分支非当前检出时仅前移本地引用，不更新工作区。默认选项 = 既有行为。
     fn pull(
         &self,
         session: &RepoSession,
@@ -934,9 +1058,15 @@ impl GitEngine for Git2Backend {
         progress: &dyn Fn(Progress),
         cancel: &CancelToken,
     ) -> Result<PullOutcome> {
-        self.with_session(session, |_s, repo| {
-            self.pull_impl(repo, branch, creds, Some(progress), None, cancel)
-        })
+        self.pull_options(
+            session,
+            branch,
+            &PullOptions::default(),
+            creds,
+            Some(progress),
+            None,
+            cancel,
+        )
     }
 
     /// 拉取（拉取对话框）：同 [`GitEngine::pull`]，过程经 `on_event` 详细上报。
@@ -948,9 +1078,108 @@ impl GitEngine for Git2Backend {
         on_event: &(dyn Fn(SyncEvent) + Send + Sync),
         cancel: &CancelToken,
     ) -> Result<PullOutcome> {
-        self.with_session(session, |_s, repo| {
-            self.pull_impl(repo, branch, creds, None, Some(on_event), cancel)
-        })
+        self.pull_options(
+            session,
+            branch,
+            &PullOptions::default(),
+            creds,
+            None,
+            Some(on_event),
+            cancel,
+        )
+    }
+
+    /// 增强拉取（FR-5.1 扩展）：抓取（--prune / --tags）后按选项整合——
+    /// 快进 / 合并（--no-ff / --no-commit / --squash）或变基（--rebase）。
+    fn pull_options(
+        &self,
+        session: &RepoSession,
+        branch: &str,
+        opts: &PullOptions,
+        creds: Option<&Credentials>,
+        progress: Option<&dyn Fn(Progress)>,
+        on_event: Option<&(dyn Fn(SyncEvent) + Send + Sync)>,
+        cancel: &CancelToken,
+    ) -> Result<PullOutcome> {
+        if opts.no_ff && opts.ff_only {
+            return Err(HigitError::new(
+                ErrorCode::Unknown,
+                "cannot combine --no-ff with --ff-only",
+            ));
+        }
+        if opts.rebase && opts.squash {
+            return Err(HigitError::new(
+                ErrorCode::Unknown,
+                "cannot combine --rebase with --squash",
+            ));
+        }
+        let plan = self.with_session(session, |_s, repo| {
+            self.pull_fetch_plan(repo, branch, opts, creds, progress, on_event, cancel)
+        })?;
+        match plan {
+            PullPlan::UpToDate => Ok(PullOutcome::default()),
+            PullPlan::FastForward { up_oid, up_name } => self.with_session(session, |_s, repo| {
+                self.pull_fast_forward(repo, branch, up_oid, &up_name, &sync_logger(on_event))
+            }),
+            PullPlan::Rebase { up_name, up_oid } => self.with_session(session, |_s, repo| {
+                self.pull_rebase(repo, branch, &up_name, up_oid, &sync_logger(on_event))
+            }),
+            PullPlan::Merge { up_name } => {
+                // 分叉 / no_ff / squash：复用增强合并的全部选项语义
+                let o = self.merge(
+                    session,
+                    &MergeOptions {
+                        kind: CheckoutTargetKind::Branch,
+                        source: up_name,
+                        no_ff: opts.no_ff,
+                        ff_only: false,
+                        no_commit: opts.no_commit,
+                        squash: opts.squash,
+                        ..Default::default()
+                    },
+                )?;
+                let log = sync_logger(on_event);
+                if !o.conflicts.is_empty() {
+                    log(
+                        "warn",
+                        format!(
+                            "merge blocked by conflicts in {} file(s); resolve them and commit",
+                            o.conflicts.len()
+                        ),
+                    );
+                    return Ok(PullOutcome {
+                        conflicts: o.conflicts,
+                        ..Default::default()
+                    });
+                }
+                if o.pending_commit {
+                    log(
+                        "ok",
+                        "merge prepared without commit (--no-commit / --squash); commit manually".into(),
+                    );
+                    return Ok(PullOutcome {
+                        pending_commit: true,
+                        ..Default::default()
+                    });
+                }
+                let head = self.with_session(session, |_s, repo| head_info_of(repo))?;
+                log(
+                    "ok",
+                    format!(
+                        "merged as commit {}",
+                        o.created_commit.clone().unwrap_or_default()
+                    ),
+                );
+                Ok(PullOutcome {
+                    updated: o.created_commit.is_some(),
+                    head: Some(head),
+                    fast_forward: false,
+                    rebased: 0,
+                    pending_commit: false,
+                    conflicts: Vec::new(),
+                })
+            }
+        }
     }
 
     fn set_proxy(&self, proxy: Option<&str>) {
@@ -1287,9 +1516,44 @@ impl GitEngine for Git2Backend {
                     staged,
                     size,
                     mtime_unix,
+                    additions: None,
+                    deletions: None,
                 });
             }
             Ok(files)
+        })
+    }
+
+    /// 提交对话框的行级变更统计（+行 / -行）：逐文件 diff HEAD↔工作区（含索引）。
+    /// 每个文件一次 pathspec 限定 diff；文件数超过上限时整体跳过（性能保护）。
+    fn change_stats(&self, session: &RepoSession, paths: &[String]) -> Result<Vec<(Option<u32>, Option<u32>)>> {
+        self.with_session(session, |_s, repo| {
+            if paths.len() > COMMIT_STATS_MAX_FILES {
+                return Ok(vec![(None, None); paths.len()]);
+            }
+            let head_tree = repo
+                .head()
+                .ok()
+                .and_then(|h| h.peel_to_commit().ok())
+                .and_then(|c| c.tree().ok());
+            let mut out = Vec::with_capacity(paths.len());
+            for p in paths {
+                let mut dopts = git2::DiffOptions::new();
+                // 未跟踪文件需要 SHOW_UNTRACKED_CONTENT 才会统计内容行数
+                dopts
+                    .pathspec(p)
+                    .include_untracked(true)
+                    .show_untracked_content(true);
+                let stats = repo
+                    .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut dopts))
+                    .ok()
+                    .and_then(|d| d.stats().ok());
+                out.push(match stats {
+                    Some(st) => (Some(st.insertions() as u32), Some(st.deletions() as u32)),
+                    None => (None, None),
+                });
+            }
+            Ok(out)
         })
     }
 
@@ -1307,59 +1571,37 @@ impl GitEngine for Git2Backend {
             let identity = resolve_identity(repo, author)?;
             let sig = Signature::now(&identity.name, &identity.email)
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            partial_commit_impl(repo, &s.workdir, message, &sig, paths, false)
+        })
+    }
 
-            let err = |e: git2::Error| HigitError::new(ErrorCode::Unknown, e.message());
-            let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-            // 勾选路径先按工作区内容暂存：只复制仓库索引条目的话，未暂存文件取到的是
-            // HEAD 旧内容，拼出的树与 HEAD 相同，会产生空提交
-            let rels: Vec<PathBuf> = paths.iter().map(|p| PathBuf::from(p.replace('\\', "/"))).collect();
-            let mut repo_index = repo.index().map_err(err)?;
-            for rel in &rels {
-                if s.workdir.join(rel).is_file() {
-                    repo_index.add_path(rel).map_err(err)?;
-                } else {
-                    // 工作区已无此文件：暂存删除；索引里也没有则忽略
-                    let _ = repo_index.remove_path(rel);
-                }
-            }
-            repo_index.write().map_err(err)?;
+    /// 按路径修补上一次提交（提交对话框 Amend + 勾选语义）：树 = HEAD 树 + 路径最新
+    /// 暂存内容，父提交沿用原提交（合并提交修补后仍为合并提交）；仅改消息也合法。
+    fn commit_amend_partial(
+        &self,
+        session: &RepoSession,
+        message: &str,
+        author: Option<&Identity>,
+        paths: &[String],
+    ) -> Result<String> {
+        self.with_session(session, |s, repo| {
+            let identity = resolve_identity(repo, author)?;
+            let sig = Signature::now(&identity.name, &identity.email)
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            partial_commit_impl(repo, &s.workdir, message, &sig, paths, true)
+        })
+    }
 
-            let mut tmp = git2::Index::new().map_err(err)?;
-            if let Some(c) = &head {
-                tmp.read_tree(&c.tree().map_err(err)?).map_err(err)?;
-            }
-            for rel in &rels {
-                match repo_index.get_path(rel, 0) {
-                    Some(entry) => tmp.add(&entry).map_err(err)?,
-                    // 暂存删除：索引已无此条目，从基树中移除
-                    None => tmp.remove_path(rel).map_err(err)?,
-                }
-            }
-            let tree_oid = tmp.write_tree_to(repo).map_err(err)?;
-            // 拼出的树与 HEAD 相同说明无变更可提交，拒绝（git 默认不产生空提交）
-            if let Some(c) = &head {
-                if tree_oid == c.tree_id() && repo.find_reference("MERGE_HEAD").is_err() {
-                    return Err(HigitError::new(ErrorCode::Unknown, "nothing to commit"));
-                }
-            }
-            let tree = repo.find_tree(tree_oid).map_err(err)?;
-
-            let mut parents: Vec<git2::Commit> = head.into_iter().collect();
-            // 合并收尾时按路径提交：保留 MERGE_HEAD 双亲语义并清理合并状态
-            let merge_head = repo.find_reference("MERGE_HEAD").ok();
-            if let Some(mh) = &merge_head {
-                if let Ok(p) = mh.peel_to_commit() {
-                    parents.push(p);
-                }
-            }
-            let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-            let oid = repo
-                .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
-                .map_err(err)?;
-            if merge_head.is_some() {
-                let _ = repo.cleanup_state();
-            }
-            Ok(oid.to_string())
+    /// 仅移动 HEAD 符号引用到指定本地分支（不更新工作区 / 索引）。
+    /// "提交到新分支"场景下新分支与 HEAD 同树，无需检出任何文件。
+    fn switch_head(&self, session: &RepoSession, branch: &str) -> Result<()> {
+        self.with_session(session, |_s, repo| {
+            // 先校验分支存在，给出明确错误而非 set_head 的模糊失败
+            repo.find_branch(branch, BranchType::Local)
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            repo.set_head(&format!("refs/heads/{branch}"))
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            Ok(())
         })
     }
 
@@ -1583,13 +1825,19 @@ impl GitEngine for Git2Backend {
             for item in remotes.flatten() {
                 let (branch, _) = item;
                 if let Some(name) = branch.name().ok().flatten() {
-                    let short = branch.get().target().map(short_id).unwrap_or_default();
+                    let reference = branch.get();
+                    let short = reference.target().map(short_id).unwrap_or_default();
+                    let summary = reference
+                        .peel_to_commit()
+                        .ok()
+                        .and_then(|c| c.summary().ok().flatten().map(str::to_string))
+                        .unwrap_or_default();
                     out.push(BranchInfo {
                         name: name.to_string(),
                         is_remote: true,
                         is_current: false,
                         short_id: short,
-                        last_commit_summary: String::new(),
+                        last_commit_summary: summary,
                         upstream: None,
                         ahead: 0,
                         behind: 0,
@@ -1634,6 +1882,179 @@ impl GitEngine for Git2Backend {
             repo.set_head(&format!("refs/heads/{name}"))
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
             Ok(())
+        })
+    }
+
+    /// 标签列表（FR-7.5）：轻量与附注标签统一 peel 到提交；按提交时间倒序。
+    fn tags(&self, session: &RepoSession) -> Result<Vec<TagInfo>> {
+        self.with_session(session, |_s, repo| {
+            let mut out: Vec<(i64, TagInfo)> = Vec::new();
+            let refs = repo
+                .references_glob("refs/tags/*")
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            for item in refs {
+                let r = item.map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                let Ok(full) = r.name() else { continue };
+                let Some(oid) = r.target() else { continue };
+                let name = full.trim_start_matches("refs/tags/").to_string();
+                // 附注标签对象与轻量标签（直接指向提交）统一解析到提交
+                let Ok(commit) = repo.find_object(oid, None).and_then(|o| o.peel_to_commit())
+                else {
+                    continue;
+                };
+                let summary = commit
+                    .summary()
+                    .ok()
+                    .flatten()
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                out.push((
+                    commit.time().seconds(),
+                    TagInfo {
+                        name,
+                        short_id: short_id(commit.id()),
+                        last_commit_summary: summary,
+                    },
+                ));
+            }
+            out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+            Ok(out.into_iter().map(|(_, t)| t).collect())
+        })
+    }
+
+    /// 增强检出（FR-7.5）：分支（本地/远端）/ 标签 / 提交 + 新建分支、强制、
+    /// 合并本地修改（stash→检出→恢复，git checkout -m 语义）、跟踪远端分支、
+    /// 覆盖已存在分支（branch -f）。
+    ///
+    /// git2 的 Commit/Branch 等句柄借用 `&Repository`，而 stash 系列要求 `&mut`，
+    /// 因此各阶段在独立作用域内取对象、用完即弃，阶段之间不保留任何借用。
+    fn checkout(&self, session: &RepoSession, opts: &CheckoutOptions) -> Result<CheckoutOutcome> {
+        self.with_session_mut(session, |_s, repo| {
+            let mut outcome = CheckoutOutcome::default();
+            let target = opts.target.trim();
+            if target.is_empty() {
+                return Err(HigitError::new(ErrorCode::Unknown, "checkout target is empty"));
+            }
+
+            // 1) 目标解析为提交 id；分支目标额外记录远端引用名（跟踪用）
+            let (commit_id, remote_ref): (Oid, Option<String>) = match opts.kind {
+                CheckoutTargetKind::Branch => {
+                    match repo.find_branch(target, BranchType::Local) {
+                        Ok(b) => (
+                            b.get().peel_to_commit().map_err(map_checkout_err)?.id(),
+                            None,
+                        ),
+                        // 本地不存在 → 尝试远端分支（如 "origin/p2-1"）
+                        Err(_) => {
+                            let b = repo
+                                .find_branch(target, BranchType::Remote)
+                                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                            (
+                                b.get().peel_to_commit().map_err(map_checkout_err)?.id(),
+                                Some(target.to_string()),
+                            )
+                        }
+                    }
+                }
+                CheckoutTargetKind::Tag => {
+                    let obj = repo
+                        .revparse_single(&format!("refs/tags/{target}"))
+                        .or_else(|_| repo.revparse_single(target))
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    (
+                        obj.peel_to_commit()
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?
+                            .id(),
+                        None,
+                    )
+                }
+                CheckoutTargetKind::Commit => (resolve_commit(repo, target)?.id(), None),
+            };
+
+            // 2) merge：先把未提交修改 stash 起来，检出后恢复（工作区无改动时跳过）
+            let stashed = if opts.merge { stash_workdir(repo)? } else { false };
+
+            // 3) 确定 HEAD 去向：新建分支 / 跟踪远端 → 先建本地分支；
+            //    远端不跟踪或标签 / 提交 → 分离 HEAD；否则指向本地分支
+            let head_ref: String;
+            {
+                let commit = repo
+                    .find_commit(commit_id)
+                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                if let Some(new_name) = opts
+                    .create_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let mut branch = repo
+                        .branch(new_name, &commit, opts.override_existing)
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    if let Some(up_ref) = remote_ref.as_deref().filter(|_| opts.track) {
+                        branch
+                            .set_upstream(Some(up_ref))
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    }
+                    head_ref = format!("refs/heads/{new_name}");
+                    outcome.created_branch = Some(new_name.to_string());
+                } else if let Some(remote_name) = remote_ref.as_deref() {
+                    if opts.track {
+                        // git checkout --track origin/x：建同名本地分支并建立跟踪
+                        let short = local_branch_name(repo, remote_name)?;
+                        let mut branch = repo
+                            .branch(&short, &commit, opts.override_existing)
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                        branch
+                            .set_upstream(Some(remote_name))
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                        head_ref = format!("refs/heads/{short}");
+                        outcome.created_branch = Some(short);
+                    } else {
+                        head_ref = String::new();
+                    }
+                } else if opts.kind == CheckoutTargetKind::Branch {
+                    head_ref = format!("refs/heads/{target}");
+                } else {
+                    head_ref = String::new();
+                }
+            }
+
+            // 4) 检出工作区并移动 HEAD（默认安全；force 覆盖工作区修改）
+            {
+                let mut co = git2::build::CheckoutBuilder::new();
+                if opts.force {
+                    co.force();
+                }
+                let obj = repo
+                    .find_object(commit_id, None)
+                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                repo.checkout_tree(&obj, Some(&mut co))
+                    .map_err(map_checkout_err)?;
+                if head_ref.is_empty() {
+                    repo.set_head_detached(commit_id)
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    outcome.detached = true;
+                } else {
+                    repo.set_head(&head_ref)
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                }
+            }
+
+            // 5) merge：恢复 stash 的修改；恢复冲突时保留冲突状态待解决
+            if stashed {
+                match repo.stash_pop(0, None) {
+                    Ok(()) => {
+                        // libgit2 stash apply 冲突时不报错：冲突条目与标记已写入
+                        // 索引 / 工作区，与 git stash pop 冲突的结果一致
+                        if repo.index().map(|i| i.has_conflicts()).unwrap_or(false) {
+                            outcome.conflicted = true;
+                        }
+                    }
+                    Err(e) => return Err(HigitError::new(ErrorCode::Unknown, e.message())),
+                }
+            }
+
+            Ok(outcome)
         })
     }
 
@@ -1684,8 +2105,40 @@ impl GitEngine for Git2Backend {
 
     /// 合并到当前分支（FR-7.4）：优先快进，否则生成合并提交；
     /// 冲突时阻断并列出冲突文件（FR-5.8 P0），仓库保留冲突状态待解决后提交。
+    /// 简化入口，委托给增强合并 `merge`（默认选项）。
     fn merge_branch(&self, session: &RepoSession, name: &str) -> Result<MergeOutcome> {
+        let r = self.merge(
+            session,
+            &MergeOptions {
+                kind: CheckoutTargetKind::Branch,
+                source: name.to_string(),
+                ..Default::default()
+            },
+        )?;
+        Ok(MergeOutcome {
+            fast_forward: r.fast_forward,
+            updated: r.updated,
+            conflicts: r.conflicts,
+        })
+    }
+
+    /// 增强合并（FR-7.6）：来源支持分支（本地/远端）/ 标签 / 提交，附 TortoiseGit 式
+    /// 选项：--no-ff / --ff-only / --no-commit / --squash、自定义提交消息、
+    /// 附加日志消息（merge.log）、-s ours 策略。
+    fn merge(&self, session: &RepoSession, opts: &MergeOptions) -> Result<MergeResult> {
         self.with_session(session, |_s, repo| {
+            let mut out = MergeResult::default();
+            let source = opts.source.trim();
+            if source.is_empty() {
+                return Err(HigitError::new(ErrorCode::Unknown, "merge source is empty"));
+            }
+            if opts.no_ff && opts.ff_only {
+                return Err(HigitError::new(
+                    ErrorCode::Unknown,
+                    "cannot combine --no-ff with --ff-only",
+                ));
+            }
+
             // 工作区必须干净（除未跟踪），避免合并中途覆盖用户修改
             {
                 let mut sopts = git2::StatusOptions::new();
@@ -1701,30 +2154,134 @@ impl GitEngine for Git2Backend {
                 }
             }
 
-            let their_branch = repo
-                .find_branch(name, BranchType::Local)
+            // 来源解析为提交 + 消息/日志用的描述与短标签
+            let (their_commit, source_desc) = match opts.kind {
+                CheckoutTargetKind::Branch => {
+                    match repo.find_branch(source, BranchType::Local) {
+                        Ok(b) => (
+                            b.get()
+                                .peel_to_commit()
+                                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
+                            format!("branch '{source}'"),
+                        ),
+                        Err(_) => {
+                            let b = repo
+                                .find_branch(source, BranchType::Remote)
+                                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                            (
+                                b.get()
+                                    .peel_to_commit()
+                                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
+                                format!("remote-tracking branch '{source}'"),
+                            )
+                        }
+                    }
+                }
+                CheckoutTargetKind::Tag => {
+                    let obj = repo
+                        .revparse_single(&format!("refs/tags/{source}"))
+                        .or_else(|_| repo.revparse_single(source))
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    (
+                        obj.peel_to_commit()
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
+                        format!("tag '{source}'"),
+                    )
+                }
+                CheckoutTargetKind::Commit => {
+                    let c = resolve_commit(repo, source)?;
+                    let desc = format!("commit '{}'", short_id(c.id()));
+                    (c, desc)
+                }
+            };
+            let their_oid = their_commit.id();
+            let log_label = match opts.kind {
+                CheckoutTargetKind::Branch => {
+                    local_branch_name(repo, source).unwrap_or_else(|_| source.to_string())
+                }
+                CheckoutTargetKind::Tag => source.to_string(),
+                CheckoutTargetKind::Commit => short_id(their_oid),
+            };
+
+            let head_commit = repo
+                .head()
+                .and_then(|h| h.peel_to_commit())
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-            let their_oid = their_branch
-                .get()
-                .target()
-                .ok_or_else(|| HigitError::new(ErrorCode::Unknown, "branch has no target"))?;
-            let their_commit = repo
-                .find_commit(their_oid)
-                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            let head_oid = head_commit.id();
+
             let annotated = repo
                 .find_annotated_commit(their_oid)
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-
             let (analysis, _) = repo
                 .merge_analysis(&[&annotated])
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
             if analysis.is_up_to_date() {
-                return Ok(MergeOutcome::default());
+                return Ok(out);
             }
 
-            if analysis.is_fast_forward() {
-                let mut opts = git2::build::CheckoutBuilder::new();
-                repo.checkout_tree(their_commit.as_object(), Some(&mut opts))
+            // 提交消息：自定义优先；否则 git 惯例格式 + 可选被合并侧日志（merge.log）
+            let auto_msg = |repo: &Repository| -> Result<String> {
+                let base = format!("Merge {source_desc}");
+                if opts.log_messages == 0 {
+                    return Ok(base);
+                }
+                let log = merge_log(repo, head_oid, their_oid, &log_label, opts.log_messages)?;
+                Ok(format!("{base}\n\n{log}"))
+            };
+            let msg = match opts.message.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(m) => m.to_string(),
+                None => auto_msg(repo)?,
+            };
+
+            // -s ours：结果树取当前分支（无内容变化、无冲突），仅记录合并关系；
+            // 永不快进（与 git 一致），ff-only 下报错
+            if opts.strategy == "ours" {
+                if opts.ff_only {
+                    return Err(HigitError::new(
+                        ErrorCode::Diverged,
+                        "Not possible to fast-forward, aborting",
+                    ));
+                }
+                repo.merge_base(head_oid, their_oid)
+                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                if opts.squash {
+                    // 无内容变化可暂存：等价 no-commit（不设 MERGE_HEAD）
+                    repo.cleanup_state()
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    out.pending_commit = true;
+                    return Ok(out);
+                }
+                if opts.no_commit {
+                    repo.reference("MERGE_HEAD", their_oid, true, "merge -s ours")
+                        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    write_merge_msg(repo, &msg)?;
+                    out.pending_commit = true;
+                    return Ok(out);
+                }
+                let sig = merge_signature(repo)?;
+                let oid = repo
+                    .commit(
+                        Some("HEAD"),
+                        &sig,
+                        &sig,
+                        &msg,
+                        &head_commit.tree().map_err(|e| {
+                            HigitError::new(ErrorCode::Unknown, e.message())
+                        })?,
+                        &[&head_commit, &their_commit],
+                    )
+                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                let _ = repo.cleanup_state();
+                out.updated = true;
+                out.created_commit = Some(oid.to_string());
+                return Ok(out);
+            }
+
+            // 快进：未禁用且可行 → 快进完成（squash 不移动分支，只把变更写入暂存区）
+            let can_ff = analysis.is_fast_forward();
+            if can_ff && !opts.no_ff && !opts.squash {
+                let mut co = git2::build::CheckoutBuilder::new();
+                repo.checkout_tree(their_commit.as_object(), Some(&mut co))
                     .map_err(map_checkout_err)?;
                 let branch = current_branch(repo)
                     .filter(|b| !b.is_empty())
@@ -1735,16 +2292,20 @@ impl GitEngine for Git2Backend {
                     .find_reference(&format!("refs/heads/{branch}"))
                     .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
                 local_ref
-                    .set_target(their_oid, &format!("merge: fast-forward {name}"))
+                    .set_target(their_oid, &format!("merge: fast-forward to {source}"))
                     .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-                return Ok(MergeOutcome {
-                    fast_forward: true,
-                    updated: true,
-                    conflicts: Vec::new(),
-                });
+                out.fast_forward = true;
+                out.updated = true;
+                return Ok(out);
+            }
+            if !can_ff && opts.ff_only {
+                return Err(HigitError::new(
+                    ErrorCode::Diverged,
+                    "Not possible to fast-forward, aborting",
+                ));
             }
 
-            // 三方合并：干净结束 → 写合并提交；冲突 → 保留冲突状态并列出文件（FR-5.8 P0）
+            // 三方合并：干净结束 → 视模式提交 / 挂起；冲突 → 保留冲突状态并列出文件（FR-5.8 P0）
             let mut merge_opts = git2::MergeOptions::new();
             let mut checkout = git2::build::CheckoutBuilder::new();
             repo.merge(&[&annotated], Some(&mut merge_opts), Some(&mut checkout))
@@ -1754,11 +2315,26 @@ impl GitEngine for Git2Backend {
                 .index()
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
             if index.has_conflicts() {
-                return Ok(MergeOutcome {
-                    fast_forward: false,
-                    updated: false,
-                    conflicts: list_conflicts(repo)?,
-                });
+                // squash 冲突：git 不保留 MERGE_HEAD，清理合并状态
+                if opts.squash {
+                    let _ = repo.cleanup_state();
+                }
+                out.conflicts = list_conflicts(repo)?;
+                return Ok(out);
+            }
+
+            if opts.squash {
+                // squash：变更已在暂存区；不建合并提交、不设 MERGE_HEAD
+                repo.cleanup_state()
+                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                out.pending_commit = true;
+                return Ok(out);
+            }
+            if opts.no_commit {
+                // 保留 repo.merge 写入的 MERGE_HEAD，写入 MERGE_MSG 供提交时预填
+                write_merge_msg(repo, &msg)?;
+                out.pending_commit = true;
+                return Ok(out);
             }
 
             index
@@ -1770,45 +2346,22 @@ impl GitEngine for Git2Backend {
             let tree = repo
                 .find_tree(tree_oid)
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-
-            let config = repo
-                .config()
+            let sig = merge_signature(repo)?;
+            let oid = repo
+                .commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    &msg,
+                    &tree,
+                    &[&head_commit, &their_commit],
+                )
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-            let name_cfg = config
-                .get_string("user.name")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let email = config
-                .get_string("user.email")
-                .ok()
-                .filter(|s| !s.is_empty());
-            let (n, e) = match (name_cfg, email) {
-                (Some(n), Some(e)) => (n, e),
-                _ => return Err(HigitError::identity_missing()),
-            };
-            let sig = Signature::now(&n, &e)
-                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-
-            let head_commit = repo
-                .head()
-                .and_then(|h| h.peel_to_commit())
-                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-            let msg = format!("Merge branch '{name}'");
-            repo.commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                &msg,
-                &tree,
-                &[&head_commit, &their_commit],
-            )
-            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-
-            Ok(MergeOutcome {
-                fast_forward: false,
-                updated: true,
-                conflicts: Vec::new(),
-            })
+            // 清理合并状态（MERGE_HEAD / MERGE_MSG），避免污染下一次提交
+            let _ = repo.cleanup_state();
+            out.updated = true;
+            out.created_commit = Some(oid.to_string());
+            Ok(out)
         })
     }
 
@@ -1995,6 +2548,198 @@ fn map_checkout_err(e: git2::Error) -> HigitError {
     } else {
         HigitError::new(ErrorCode::Unknown, e.message())
     }
+}
+
+/// 把工作区（含暂存区）的已跟踪修改 stash 起来，供 merge 检出携带。
+/// 无改动 / 冲突状态（无法 stash）时返回 false。未跟踪文件不参与（与 git checkout -m 一致）。
+fn stash_workdir(repo: &mut Repository) -> Result<bool> {
+    // statuses 借用 &repo，须在 stash_save2（&mut）前结束，故先在块内算出 dirty
+    let dirty = {
+        let statuses = repo
+            .statuses(None)
+            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+        let mut dirty = false;
+        for s in statuses.iter() {
+            let st = s.status();
+            if st.intersects(git2::Status::CONFLICTED) {
+                // 仓库处于冲突状态：无法 stash，交给后续安全检出自行报错
+                return Ok(false);
+            }
+            if st.is_empty() || st == Status::WT_NEW || st == Status::IGNORED {
+                continue;
+            }
+            dirty = true;
+        }
+        dirty
+    };
+    if !dirty {
+        return Ok(false);
+    }
+    let sig = repo.signature().map_err(|_| HigitError::identity_missing())?;
+    repo.stash_save2(&sig, None, None)
+        .map(|_| true)
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))
+}
+
+/// 远端分支引用名（如 "origin/feature/x"）对应的本地分支名：
+/// 去掉已配置远端的前缀（git checkout --track 语义）；未匹配时取最后一段兜底。
+fn local_branch_name(repo: &Repository, remote_ref: &str) -> Result<String> {
+    let short = remote_ref.trim_start_matches("remotes/");
+    let remotes = repo
+        .remotes()
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    for i in 0..remotes.len() {
+        let Ok(Some(r)) = remotes.get(i) else { continue };
+        if let Some(stripped) = short.strip_prefix(&format!("{r}/")) {
+            return Ok(stripped.to_string());
+        }
+    }
+    Ok(short.rsplit('/').next().unwrap_or(short).to_string())
+}
+
+/// 合并提交签名：取仓库配置的 user.name / user.email
+fn merge_signature(repo: &Repository) -> Result<Signature<'_>> {
+    let config = repo
+        .config()
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    let name = config
+        .get_string("user.name")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let email = config
+        .get_string("user.email")
+        .ok()
+        .filter(|s| !s.is_empty());
+    match (name, email) {
+        (Some(n), Some(e)) => Signature::now(&n, &e)
+            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message())),
+        _ => Err(HigitError::identity_missing()),
+    }
+}
+
+/// merge.log：被合并侧（base..theirs）最近 limit 条提交摘要，git 惯例的短日志段落格式
+fn merge_log(
+    repo: &Repository,
+    base: Oid,
+    theirs: Oid,
+    label: &str,
+    limit: u32,
+) -> Result<String> {
+    let mut revwalk = repo
+        .revwalk()
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    revwalk.push(theirs).map_err(|e| {
+        HigitError::new(ErrorCode::Unknown, e.message())
+    })?;
+    revwalk.hide(base).map_err(|e| {
+        HigitError::new(ErrorCode::Unknown, e.message())
+    })?;
+    revwalk
+        .set_sorting(Sort::TIME | Sort::TOPOLOGICAL)
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    let mut lines = vec![format!("* {label}:")];
+    for oid in revwalk.take(limit as usize) {
+        let Ok(oid) = oid else { continue };
+        let Ok(c) = repo.find_commit(oid) else { continue };
+        let summary = c.summary().ok().flatten().unwrap_or_default();
+        lines.push(format!("  {summary}"));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// 写入 MERGE_MSG（--no-commit 挂起时的预填消息）；git2 未绑定 message_set，直接写文件
+fn write_merge_msg(repo: &Repository, msg: &str) -> Result<()> {
+    let path = repo.path().join("MERGE_MSG");
+    std::fs::write(&path, format!("{msg}\n"))
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.to_string()))
+}
+
+/// commit_partial / commit_amend_partial 共用：按路径拼树后落提交。
+/// amend=false 在 HEAD 之上新提交（空提交拒绝、MERGE_HEAD 双亲语义）；
+/// amend=true 替换 HEAD（父提交沿用原提交，仅改消息的空树修补合法）。
+fn partial_commit_impl(
+    repo: &Repository,
+    workdir: &Path,
+    message: &str,
+    sig: &Signature<'_>,
+    paths: &[String],
+    amend: bool,
+) -> Result<String> {
+    let err = |e: git2::Error| HigitError::new(ErrorCode::Unknown, e.message());
+    let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    if amend && head.is_none() {
+        return Err(HigitError::new(ErrorCode::Unknown, "no commit to amend"));
+    }
+    // 勾选路径先按工作区内容暂存：只复制仓库索引条目的话，未暂存文件取到的是
+    // HEAD 旧内容，拼出的树与 HEAD 相同，会产生空提交
+    let rels: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| PathBuf::from(p.replace('\\', "/")))
+        .collect();
+    let mut repo_index = repo.index().map_err(err)?;
+    for rel in &rels {
+        if workdir.join(rel).is_file() {
+            repo_index.add_path(rel).map_err(err)?;
+        } else {
+            // 工作区已无此文件：暂存删除；索引里也没有则忽略
+            let _ = repo_index.remove_path(rel);
+        }
+    }
+    repo_index.write().map_err(err)?;
+
+    let mut tmp = git2::Index::new().map_err(err)?;
+    if let Some(c) = &head {
+        tmp.read_tree(&c.tree().map_err(err)?).map_err(err)?;
+    }
+    for rel in &rels {
+        match repo_index.get_path(rel, 0) {
+            Some(entry) => tmp.add(&entry).map_err(err)?,
+            // 暂存删除：索引已无此条目，从基树中移除
+            None => tmp.remove_path(rel).map_err(err)?,
+        }
+    }
+    let tree_oid = tmp.write_tree_to(repo).map_err(err)?;
+    // 拼出的树与 HEAD 相同说明无变更可提交，拒绝（git 默认不产生空提交）；
+    // amend 仅改消息是合法操作，不拒绝
+    if let Some(c) = &head {
+        if tree_oid == c.tree_id() && !amend && repo.find_reference("MERGE_HEAD").is_err() {
+            return Err(HigitError::new(ErrorCode::Unknown, "nothing to commit"));
+        }
+    }
+    let tree = repo.find_tree(tree_oid).map_err(err)?;
+
+    if amend {
+        let head = head.as_ref().unwrap();
+        let parents: Vec<git2::Commit> = head.parents().collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        // amend 的第一亲代是 HEAD~1，git_commit_create(update_ref=HEAD) 会因
+        // "first parent 不是当前 tip" 拒绝：先只建提交对象，再手动前移分支引用
+        let oid = repo
+            .commit(None, sig, sig, message, &tree, &parent_refs)
+            .map_err(err)?;
+        let mut head_ref = repo
+            .head()
+            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+        head_ref.set_target(oid, "commit: amend").map_err(err)?;
+        return Ok(oid.to_string());
+    }
+
+    let mut parents: Vec<git2::Commit> = head.into_iter().collect();
+    // 合并收尾时按路径提交：保留 MERGE_HEAD 双亲语义并清理合并状态
+    let merge_head = repo.find_reference("MERGE_HEAD").ok();
+    if let Some(mh) = &merge_head {
+        if let Ok(p) = mh.peel_to_commit() {
+            parents.push(p);
+        }
+    }
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+    let oid = repo
+        .commit(Some("HEAD"), sig, sig, message, &tree, &parent_refs)
+        .map_err(err)?;
+    if merge_head.is_some() {
+        let _ = repo.cleanup_state();
+    }
+    Ok(oid.to_string())
 }
 
 /// 短 hash（7 位，与 git 默认一致）
@@ -2365,6 +3110,42 @@ impl<'a> AuthLog<'a> {
             self.log("ok", format!("认证通过: {d}"));
         }
     }
+}
+
+/// 拉取整合方案（pull_fetch_plan 依据本地/远端关系决定）
+enum PullPlan {
+    UpToDate,
+    FastForward { up_oid: Oid, up_name: String },
+    Merge { up_name: String },
+    Rebase { up_name: String, up_oid: Oid },
+}
+
+/// 同步过程日志：on_event 缺省时静默
+fn sync_logger<'a>(
+    on_event: Option<&'a (dyn Fn(SyncEvent) + Send + Sync)>,
+) -> impl Fn(&str, String) + 'a {
+    move |level: &str, text: String| {
+        if let Some(ev) = on_event {
+            ev(SyncEvent::Log {
+                level: level.to_string(),
+                text,
+            });
+        }
+    }
+}
+
+/// 当前 HEAD 的摘要信息（快进 / 合并 / 变基完成后回填 PullOutcome）
+fn head_info_of(repo: &Repository) -> Result<HeadInfo> {
+    let c = repo
+        .head()
+        .and_then(|h| h.peel_to_commit())
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    Ok(HeadInfo {
+        short_id: short_id(c.id()),
+        summary: c.summary().ok().flatten().unwrap_or_default().to_string(),
+        time_unix: c.time().seconds(),
+        committer_email: c.committer().email().unwrap_or("").to_string(),
+    })
 }
 
 /// 凭证回调：HTTPS 走用户名/密码；SSH 按链路逐次尝试 指定密钥（格式受支持时优先）→

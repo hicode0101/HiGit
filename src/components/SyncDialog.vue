@@ -2,7 +2,7 @@
 /** 同步对话框（推送 / 拉取 / 抓取，FR-5.2 扩展）：版本信息 / 认证 / Git 身份 三页；
  * 推送=多分支+目标分支+Force，拉取=单选分支（默认当前），抓取=全部分支只读展示；
  * 开始后切换到进度 + 详细日志页（目标地址 / 认证方式 / 待传输内容 / 远端输出 / 结果） */
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { store, type SyncKind, showError } from "../store";
 import { api, onJobProgress, onSyncLog, replaySyncLogs } from "../api";
 import type { JobDoneEvent, SyncLogEvent, SyncPreviewDto, RepoEntryDto } from "../api/types";
@@ -34,6 +34,23 @@ const mode = computed<SyncKind>(() => store.ui.syncDialog ?? "push");
 const selected = ref<string[]>([]);
 const targets = ref<Record<string, string>>({});
 const force = ref(false);
+
+// 拉取选项（对应 TortoiseGit Pull）：整合方式 + 合并选项 + prune / tags
+const pullRebase = ref(false);
+const pullNoFF = ref(false);
+const pullFFOnly = ref(false);
+const pullNoCommit = ref(false);
+const pullSquash = ref(false);
+const pullAllTags = ref(false);
+const pullPrune = ref(true);
+
+// --no-ff 与 --ff-only 互斥；--squash 隐含 --no-commit
+watch(pullNoFF, (v) => {
+  if (v) pullFFOnly.value = false;
+});
+watch(pullFFOnly, (v) => {
+  if (v) pullNoFF.value = false;
+});
 
 // 认证页 / Git 身份页（与克隆对话框一致；有改动才回写仓库设置）
 const authKind = ref<"http" | "ssh">("http");
@@ -330,7 +347,19 @@ async function doStart() {
       force: force.value,
     };
   } else if (mode.value === "pull") {
-    payload = { kind: "pull", branch: selected.value[0] };
+    payload = {
+      kind: "pull",
+      branch: selected.value[0],
+      pullOpts: {
+        rebase: pullRebase.value,
+        noFf: pullNoFF.value,
+        ffOnly: pullFFOnly.value,
+        noCommit: !pullSquash.value && pullNoCommit.value,
+        squash: pullSquash.value,
+        allTags: pullAllTags.value,
+        prune: pullPrune.value,
+      },
+    };
   } else {
     payload = { kind: "fetch" };
   }
@@ -492,6 +521,71 @@ onUnmounted(() => {
             </div>
             <div v-if="preview && preview.branches.length === 0" class="empty-hint">
               {{ t("No local branches") }}
+            </div>
+          </div>
+
+          <!-- 拉取选项（对应 TortoiseGit Pull 的 Option 区） -->
+          <div class="pull-opts">
+            <div class="po-row">
+              <span class="po-label">{{ t("Integration") }}:</span>
+              <label class="check-line">
+                <input v-model="pullRebase" type="radio" :value="false" />
+                <span>{{ t("Merge") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :title="t('Replay local commits on top of the fetched tip (git pull --rebase); on conflict the rebase is aborted and the original branch restored')"
+              >
+                <input v-model="pullRebase" type="radio" :value="true" />
+                <span>{{ t("Rebase") }}</span>
+              </label>
+            </div>
+            <div v-if="!pullRebase" class="po-row">
+              <label
+                class="check-line"
+                :title="t('Always create a merge commit even when fast-forward is possible (git merge --no-ff)')"
+              >
+                <input v-model="pullNoFF" type="checkbox" />
+                <span>{{ t("No Fast Forward") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :title="t('Abort unless the merge can be resolved as a fast-forward (git merge --ff-only)')"
+              >
+                <input v-model="pullFFOnly" type="checkbox" />
+                <span>{{ t("Fast Forward Only") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :class="{ off: pullSquash }"
+                :title="t('Perform the merge but stop before creating the merge commit (git merge --no-commit)')"
+              >
+                <input v-model="pullNoCommit" type="checkbox" :disabled="pullSquash" />
+                <span>{{ t("No Commit") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :title="t('Stage the merge result without creating a merge commit (git merge --squash)')"
+              >
+                <input v-model="pullSquash" type="checkbox" />
+                <span>{{ t("Squash") }}</span>
+              </label>
+            </div>
+            <div class="po-row">
+              <label
+                class="check-line"
+                :title="t('Remove remote-tracking branches deleted on the remote (git fetch --prune)')"
+              >
+                <input v-model="pullPrune" type="checkbox" />
+                <span>{{ t("Prune") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :title="t('Fetch all tags instead of only reachable ones (git fetch --tags)')"
+              >
+                <input v-model="pullAllTags" type="checkbox" />
+                <span>{{ t("Tags") }}</span>
+              </label>
             </div>
           </div>
         </template>
@@ -784,6 +878,33 @@ onUnmounted(() => {
   gap: 8px;
   font-size: 13px;
   cursor: pointer;
+}
+
+/* 拉取选项区（TortoiseGit Pull 的 Option 区） */
+.pull-opts {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.po-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.po-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.po-row .check-line.off {
+  color: var(--text-disabled);
 }
 
 .force-line {

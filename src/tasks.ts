@@ -1,6 +1,6 @@
 /** 共享动作层：长任务（同步/克隆）事件处理 + 暂存 / 丢弃 / 提交 / 同步动作 */
 import { api, HigitApiError, onJobDone, onJobProgress } from "./api";
-import type { JobDoneEvent, StatusDto } from "./api/types";
+import type { JobDoneEvent, PullOptsDto, StatusDto } from "./api/types";
 import {
   store,
   showError,
@@ -255,6 +255,8 @@ export type SyncJobReq = {
   branch?: string;
   /** push：强制推送 */
   force?: boolean;
+  /** pull：TortoiseGit 式拉取选项（缺省 = 快进优先、分叉报错、不 prune） */
+  pullOpts?: PullOptsDto | null;
   creds: SyncCreds | null;
   remember: boolean;
 };
@@ -266,6 +268,7 @@ export async function startSyncJob(req: SyncJobReq): Promise<number> {
     refspecs: req.refspecs ?? [],
     branch: req.branch ?? "",
     force: req.force ?? false,
+    pullOpts: req.pullOpts ?? null,
     creds: req.creds,
     remember: req.remember,
   });
@@ -346,19 +349,21 @@ export async function discardPaths(paths: string[]): Promise<boolean> {
 /**
  * 提交（FR-4）。`prep` 为提交对话框勾选语义：提交前先把勾选的文件暂存
  * （未暂存内容纳入提交），再把未勾选但已暂存的文件反暂存（避免混入本次提交）；
- * `paths` 传入时按路径提交（git commit -- <paths> 语义），只提交这些文件。
+ * `paths` 传入时按路径提交（git commit -- <paths> 语义），只提交这些文件；
+ * `newBranch` 传入时先在 HEAD 处建分支并切换（提交落到新分支，原分支不动）。
  */
 export async function doCommit(
   message: string,
   amend: boolean,
   prep?: { stage: string[]; unstage: string[] },
   paths?: string[],
+  newBranch?: string | null,
 ): Promise<boolean> {
   if (!store.repoOpen) return false;
   try {
     if (prep?.unstage.length) await api.unstagePaths(prep.unstage);
     if (prep?.stage.length) await api.stagePaths(prep.stage);
-    const shortId = await api.commit(message, amend, paths);
+    const shortId = await api.commit(message, amend, paths, newBranch);
     toast(`${t("Commit created")} ${shortId}`);
     await refreshStatus();
     await refreshIdentity();

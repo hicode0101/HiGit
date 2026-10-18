@@ -22,6 +22,10 @@ export interface StagedFileDto {
   staged: boolean;
   size: number | null;
   mtimeUnix: number | null;
+  /** 相对 HEAD 的新增行数（二进制 / 文件过多未统计为 null） */
+  additions: number | null;
+  /** 相对 HEAD 的删除行数 */
+  deletions: number | null;
 }
 
 /** 提交对话框预览数据（committer 为 "name <email>"，未配置时为空串） */
@@ -181,6 +185,89 @@ export interface MergeOutcomeDto {
   conflicts: string[];
 }
 
+/** 增强合并请求（对应 TortoiseGit Merge 对话框选项） */
+export interface MergeOptsDto {
+  /** "branch" | "tag" | "commit" */
+  kind: "branch" | "tag" | "commit";
+  /** 分支名（本地或远端 "origin/x"）/ 标签名 / 提交 hash 或 revparse 表达式 */
+  source: string;
+  /** 禁用快进：总是产生合并提交（git merge --no-ff） */
+  noFf: boolean;
+  /** 仅允许快进：无法快进时报错（git merge --ff-only） */
+  ffOnly: boolean;
+  /** 合并后不自动创建合并提交（git merge --no-commit） */
+  noCommit: boolean;
+  /** 压缩合并（git merge --squash）：变更进入暂存区，不建合并提交 */
+  squash: boolean;
+  /** 合并提交消息：null/空 = 自动生成 */
+  message: string | null;
+  /** 自动消息附加被合并侧最近 N 条提交摘要（merge.log；0 = 不附加） */
+  logMessages: number;
+  /** 合并策略："" = 默认；"ours" = 结果树取当前分支（git merge -s ours） */
+  strategy: string;
+}
+
+export interface MergeResultDto {
+  fastForward: boolean;
+  updated: boolean;
+  conflicts: string[];
+  /** 合并完成但未创建提交（--no-commit / --squash）：等待用户手动提交 */
+  pendingCommit: boolean;
+  /** 本次创建的合并提交 */
+  createdCommit: string | null;
+}
+
+/** 拉取选项（对应 TortoiseGit Pull 对话框选项） */
+export interface PullOptsDto {
+  /** 变基整合（git pull --rebase） */
+  rebase: boolean;
+  /** 禁用快进（git pull --no-ff） */
+  noFf: boolean;
+  /** 仅允许快进（git pull --ff-only） */
+  ffOnly: boolean;
+  /** 合并后不自动提交（git pull --no-commit） */
+  noCommit: boolean;
+  /** 压缩合并（git pull --squash） */
+  squash: boolean;
+  /** 抓取所有标签（git fetch --tags） */
+  allTags: boolean;
+  /** 清理已被远端删除的远程跟踪分支（git fetch --prune） */
+  prune: boolean;
+}
+
+export interface TagDto {
+  name: string;
+  shortId: string;
+  lastCommitSummary: string;
+}
+
+/** 增强检出请求（对应 TortoiseGit Switch/Checkout 对话框选项） */
+export interface CheckoutOptsDto {
+  /** "branch" | "tag" | "commit" */
+  kind: "branch" | "tag" | "commit";
+  /** 分支名（本地或远端 "origin/x"）/ 标签名 / 提交 hash 或 revparse 表达式 */
+  target: string;
+  /** 在目标处新建分支并检出（分支名） */
+  createBranch?: string | null;
+  /** 强制检出：覆盖会被触及的工作区修改（git checkout -f） */
+  force: boolean;
+  /** 携带未提交修改切换（stash→检出→恢复，git checkout -m 语义） */
+  merge: boolean;
+  /** 目标为远端分支时建立跟踪（自动创建同名本地分支） */
+  track: boolean;
+  /** 新建/自动创建的本地分支已存在时强制移动到目标 */
+  overrideExisting: boolean;
+}
+
+export interface CheckoutOutcomeDto {
+  /** 是否处于分离 HEAD（检出标签/提交，或远端分支且未跟踪） */
+  detached: boolean;
+  /** 本次新建并切换到的本地分支名 */
+  createdBranch: string | null;
+  /** 携带的本地修改与目标分支冲突：冲突已写入工作区待解决 */
+  conflicted: boolean;
+}
+
 /** 工作区清理请求（git clean 组合） */
 export interface CleanOptsDto {
   /** "all" = -fx；"untracked" = -f；"ignored" = -fX */
@@ -248,7 +335,15 @@ export interface JobDoneEvent {
   ok: boolean;
   error: CommandErrorDto | null;
   repoPath: string | null;
-  outcome: { createdUpstream?: boolean; updated?: boolean; headShortId?: string } | null;
+  outcome: {
+    createdUpstream?: boolean;
+    updated?: boolean;
+    headShortId?: string;
+    fastForward?: boolean;
+    rebased?: number;
+    pendingCommit?: boolean;
+    conflicts?: string[];
+  } | null;
 }
 
 export interface StatusEvent {

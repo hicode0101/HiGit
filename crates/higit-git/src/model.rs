@@ -209,6 +209,94 @@ pub struct MergeOutcome {
     pub conflicts: Vec<PathBuf>,
 }
 
+/// 标签信息（FR-7.5）：轻量与附注标签统一解析到目标提交。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagInfo {
+    /// 标签名（不含 refs/tags/ 前缀）
+    pub name: String,
+    /// 目标提交短 hash
+    pub short_id: String,
+    /// 目标提交标题（首行）
+    pub last_commit_summary: String,
+}
+
+/// 增强检出的目标类型：分支 / 标签 / 任意提交（FR-7.5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CheckoutTargetKind {
+    #[default]
+    Branch,
+    Tag,
+    Commit,
+}
+
+/// 增强检出选项（FR-7.5，对应 TortoiseGit Switch/Checkout 对话框的全部选项）。
+#[derive(Debug, Clone, Default)]
+pub struct CheckoutOptions {
+    pub kind: CheckoutTargetKind,
+    /// 目标名：分支名（本地或远端 "origin/x"）/ 标签名 / 提交 hash 或 revparse 表达式
+    pub target: String,
+    /// 在目标处新建分支并检出（Some = 分支名）
+    pub create_branch: Option<String>,
+    /// 强制检出：覆盖会被触及的工作区修改（git checkout -f）
+    pub force: bool,
+    /// 携带未提交修改切换：stash → 检出 → 恢复（git checkout -m 语义）；
+    /// 恢复冲突时工作区保留冲突状态，`CheckoutOutcome::conflicted` 置位
+    pub merge: bool,
+    /// 目标为远端分支时建立跟踪（git checkout --track）：自动创建同名本地分支
+    pub track: bool,
+    /// 新建 / 自动创建的本地分支已存在时强制移动到目标（git branch -f）
+    pub override_existing: bool,
+}
+
+/// 增强检出结果（FR-7.5）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckoutOutcome {
+    /// 是否处于分离 HEAD（直接检出了提交 / 标签，或远端分支且未跟踪）
+    pub detached: bool,
+    /// 本次新建并切换到的本地分支名
+    pub created_branch: Option<String>,
+    /// merge 携带的本地修改与目标分支存在冲突：冲突已写入工作区待解决
+    pub conflicted: bool,
+}
+
+/// 增强合并选项（FR-7.6，对应 TortoiseGit Merge 对话框）。
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions {
+    /// 合并来源类型：分支（本地或远端 "origin/x"）/ 标签 / 提交
+    pub kind: CheckoutTargetKind,
+    /// 来源名：分支名 / 标签名 / 提交 hash 或 revparse 表达式
+    pub source: String,
+    /// 禁用快进：总是产生合并提交（git merge --no-ff）
+    pub no_ff: bool,
+    /// 仅允许快进：无法快进时报错（git merge --ff-only）
+    pub ff_only: bool,
+    /// 合并后不自动创建合并提交（git merge --no-commit）：保留 MERGE_HEAD 由用户手动提交
+    pub no_commit: bool,
+    /// 压缩合并（git merge --squash）：变更进入暂存区，不建合并提交、不设 MERGE_HEAD
+    pub squash: bool,
+    /// 合并提交消息：None/空 = 自动生成（"Merge branch 'x'" 等 git 惯例格式）
+    pub message: Option<String>,
+    /// 自动消息附加被合并侧最近 N 条提交摘要（merge.log 语义；0 = 不附加）
+    pub log_messages: u32,
+    /// 合并策略："" = 默认三方合并；"ours" = 结果树取当前分支，仅记录合并关系（git merge -s ours）
+    pub strategy: String,
+}
+
+/// 增强合并结果（FR-7.6）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeResult {
+    /// 是否以快进方式完成
+    pub fast_forward: bool,
+    /// 当前分支是否前进（false = 已是最新；冲突时也为 false）
+    pub updated: bool,
+    /// 冲突文件列表；非空 = 合并被阻断、仓库处于冲突状态待解决
+    pub conflicts: Vec<PathBuf>,
+    /// 合并完成但未创建提交（--no-commit / --squash）：变更已就绪，等待用户手动提交
+    pub pending_commit: bool,
+    /// 本次创建的合并提交（自动提交时）
+    pub created_commit: Option<String>,
+}
+
 /// 清理范围（git clean 的 -f / -fx / -fX 组合）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanMode {

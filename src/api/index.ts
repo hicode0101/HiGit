@@ -4,6 +4,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   BootstrapDto,
   BranchDto,
+  CheckoutOptsDto,
+  CheckoutOutcomeDto,
   CommitDetailDto,
   CommitEntryDto,
   CommitMessageDto,
@@ -17,7 +19,10 @@ import type {
   IdentityDto,
   JobDoneEvent,
   JobProgressEvent,
+  MergeOptsDto,
   MergeOutcomeDto,
+  MergeResultDto,
+  PullOptsDto,
   SyncLogEvent,
   SyncPreviewDto,
   RepoEntryDto,
@@ -25,6 +30,7 @@ import type {
   RepoViewDto,
   StatusDto,
   StatusEvent,
+  TagDto,
   TreeRowDto,
 } from "./types";
 
@@ -94,8 +100,13 @@ export const api = {
   unstagePaths: (paths: string[]) => invoke<StatusDto>("unstage_paths", { paths }),
   discardPaths: (paths: string[]) => invoke<StatusDto>("discard_paths", { paths }),
   cleanWorktree: (opts: CleanOptsDto) => invoke<CleanOutcomeDto>("clean_worktree", { opts }),
-  commit: (message: string, amend: boolean, paths?: string[]) =>
-    invoke<string>("commit", { message, amend, paths: paths ?? null }),
+  commit: (message: string, amend: boolean, paths?: string[], newBranch?: string | null) =>
+    invoke<string>("commit", {
+      message,
+      amend,
+      paths: paths ?? null,
+      newBranch: newBranch ?? null,
+    }),
   commitPreview: (rel: string) => invoke<CommitPreviewDto>("commit_preview", { rel }),
   lastCommitMessage: () => invoke<CommitMessageDto | null>("last_commit_message"),
   diffFile: (path: string, spec: "workdir" | "staged") =>
@@ -109,6 +120,7 @@ export const api = {
     refspecs?: { local: string; remote: string }[];
     branch?: string;
     force?: boolean;
+    pullOpts?: PullOptsDto | null;
     creds: CredsDto | null;
     remember: boolean;
   }) => invoke<number>("sync_start", { req }),
@@ -123,11 +135,15 @@ export const api = {
   branchCreate: (name: string, from: string, checkout: boolean) =>
     invoke<void>("branch_create", { name, from, checkout }),
   branchCheckout: (name: string) => invoke<StatusDto>("branch_checkout", { name }),
+  listTags: () => invoke<TagDto[]>("list_tags"),
+  checkoutTarget: (opts: CheckoutOptsDto) =>
+    invoke<CheckoutOutcomeDto>("checkout_target", { opts }),
   branchRename: (oldName: string, newName: string) =>
     invoke<void>("branch_rename", { old: oldName, new: newName }),
   branchDelete: (name: string, force: boolean) =>
     invoke<void>("branch_delete", { name, force }),
   branchMerge: (name: string) => invoke<MergeOutcomeDto>("branch_merge", { name }),
+  mergeTarget: (opts: MergeOptsDto) => invoke<MergeResultDto>("merge_target", { opts }),
   getEffectiveIdentity: () => invoke<IdentityDto | null>("get_effective_identity"),
   getGlobalIdentity: () => invoke<IdentityDto | null>("get_global_identity"),
   setIdentity: (scope: "repo" | "global", identity: IdentityDto) =>

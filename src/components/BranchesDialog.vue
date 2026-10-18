@@ -47,10 +47,23 @@ async function run(fn: () => Promise<void>) {
 }
 
 async function switchTo(b: BranchDto) {
-  if (b.isCurrent || b.isRemote || busy.value) return;
+  if (b.isCurrent || busy.value) return;
   await run(async () => {
-    await api.branchCheckout(b.name);
-    toast(`${t("Switched to")} ${b.name}`);
+    // 本地直接检出；远端分支自动建立跟踪（创建同名本地分支，git checkout --track）
+    const o = await api.checkoutTarget({
+      kind: "branch",
+      target: b.name,
+      force: false,
+      merge: false,
+      track: b.isRemote,
+      overrideExisting: false,
+    });
+    const dest = o.createdBranch ?? b.name;
+    toast(
+      o.detached && !o.createdBranch
+        ? `${t("Checked out")} ${b.name} (${t("detached HEAD")})`
+        : `${t("Switched to")} ${dest}`,
+    );
     await Promise.all([refreshStatus(), refreshRepos()]);
     await load();
   });
@@ -166,9 +179,16 @@ async function mergeBranch(b: BranchDto) {
       <div v-if="locals.length === 0" class="empty">{{ t("No local branches") }}</div>
 
       <div class="group-title">{{ t("Remote") }}</div>
-      <div v-for="b in remotes" :key="b.name" class="branch-row remote">
+      <div
+        v-for="b in remotes"
+        :key="b.name"
+        class="branch-row remote"
+        :title="t('Create a local branch with the same name tracking it (git checkout --track)')"
+        @click="switchTo(b)"
+      >
         <IconGlyph name="branch" :size="14" />
         <span class="ellipsis b-name">{{ b.name }}</span>
+        <span class="p-id">{{ b.shortId }}</span>
         <span class="b-summary ellipsis">{{ b.lastCommitSummary }}</span>
       </div>
     </div>
@@ -250,7 +270,13 @@ async function mergeBranch(b: BranchDto) {
 
 .branch-row.remote {
   color: var(--text-secondary);
-  cursor: default;
+}
+
+.branch-row.remote .p-id {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: Consolas, monospace;
 }
 
 .b-name {

@@ -1200,3 +1200,1149 @@ fn clean_worktree_dry_run_keeps_files() {
     assert_eq!(o.paths, vec![PathBuf::from("u.txt")]);
     assert!(dir.0.join("u.txt").exists());
 }
+
+// ---------- 增强检出（FR-7.5：分支/标签/提交 + TortoiseGit 式选项） ----------
+
+use higit_git::model::{CheckoutOptions, CheckoutTargetKind};
+
+/// 仅指定目标类型与目标的 CheckoutOptions（其余选项默认关闭）
+fn co(kind: CheckoutTargetKind, target: &str) -> CheckoutOptions {
+    CheckoutOptions {
+        kind,
+        target: target.to_string(),
+        ..Default::default()
+    }
+}
+
+/// main 前进一个提交（README → "# second\n"）
+fn advance_main(
+    backend: &dyn higit_git::engine::GitEngine,
+    session: &higit_git::engine::RepoSession,
+    dir: &Path,
+) {
+    write(&dir.join("README.md"), "# second\n");
+    backend.stage(session, &[dir.join("README.md")]).unwrap();
+    backend.commit(session, "second", None).unwrap();
+}
+
+#[test]
+fn tags_list_and_checkout_tag_commit_detach_head() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+    advance_main(backend.as_ref(), &session, &dir.0);
+
+    // fixture：v1 → 初始提交（轻量），v2 → 当前提交（附注）
+    let first = {
+        let repo = git2::Repository::open(&dir.0).unwrap();
+        let first = repo.revparse_single("main~1").unwrap();
+        repo.reference("refs/tags/v1", first.id(), false, "v1")
+            .unwrap();
+        let sig = git2::Signature::now("t", "t@higit.dev").unwrap();
+        let head = repo.revparse_single("main").unwrap().peel_to_commit().unwrap();
+        repo.tag("v2", head.as_object(), &sig, "v2", false).unwrap();
+        first.id()
+    };
+
+    // 两个标签都能列出（按提交时间倒序，同秒时按名称兜底）
+    let tags = backend.tags(&session).unwrap();
+    assert_eq!(tags.len(), 2);
+    let v1 = tags.iter().find(|x| x.name == "v1").unwrap();
+    let v2 = tags.iter().find(|x| x.name == "v2").unwrap();
+    // 轻量 / 附注标签统一解析到目标提交
+    assert_eq!(v1.short_id, first.to_string()[..7]);
+    assert_eq!(v1.last_commit_summary, "initial");
+    assert_eq!(v2.last_commit_summary, "second");
+
+    // 切到标签 v1 → 分离 HEAD，工作区回到初始内容
+    let o = backend
+        .checkout(&session, &co(CheckoutTargetKind::Tag, "v1"))
+        .unwrap();
+    assert!(o.detached);
+    assert_eq!(o.created_branch, None);
+    assert_eq!(
+        fs::read_to_string(dir.0.join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "# fixture\n"
+    );
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_ne!(st.branch.as_deref(), Some("main"));
+    assert_eq!(st.head.map(|h| h.summary), Some("initial".to_string()));
+
+    // 切到提交表达式 main~1 同样分离；再切回 main 恢复分支状态
+    let o = backend
+        .checkout(&session, &co(CheckoutTargetKind::Commit, "main~1"))
+        .unwrap();
+    assert!(o.detached);
+    backend.checkout_branch(&session, "main").unwrap();
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("main"));
+}
+
+#[test]
+fn checkout_remote_branch_track_creates_local_branch() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    // 本地建 topic 分支并推送，然后删掉本地分支，只留远端引用
+    backend.create_branch(&sa, "topic", None).unwrap();
+    backend.checkout_branch(&sa, "topic").unwrap();
+    write(&a.0.join("topic.txt"), "topic\n");
+    backend.stage(&sa, &[a.0.join("topic.txt")]).unwrap();
+    backend.commit(&sa, "topic work", None).unwrap();
+    backend.push(&sa, "topic", None, &|_| {}, &token).unwrap();
+    backend.fetch(&sa, "", None, &|_| {}, &token).unwrap();
+    backend.checkout_branch(&sa, "main").unwrap();
+    backend.delete_branch(&sa, "topic", true).unwrap();
+
+    // 不跟踪 → 分离 HEAD 到远端提交（与 git checkout origin/topic 一致）
+    let o = backend
+        .checkout(&sa, &co(CheckoutTargetKind::Branch, "origin/topic"))
+        .unwrap();
+    assert!(o.detached);
+    assert_eq!(o.created_branch, None);
+    assert!(a.0.join("topic.txt").exists());
+
+    // 跟踪 → 创建同名本地分支并建立上游（git checkout --track）
+    let o = backend
+        .checkout(
+            &sa,
+            &CheckoutOptions {
+                track: true,
+                ..co(CheckoutTargetKind::Branch, "origin/topic")
+            },
+        )
+        .unwrap();
+    assert!(!o.detached);
+    assert_eq!(o.created_branch.as_deref(), Some("topic"));
+    let st = backend.status(&sa, &StatusOpts::default()).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("topic"));
+    assert!(st.upstream);
+    let list = backend.branches(&sa).unwrap();
+    let topic = list.iter().find(|b| b.name == "topic").unwrap();
+    assert_eq!(topic.upstream.as_deref(), Some("origin/topic"));
+
+    // 本地分支已存在：不覆盖被拒；override 强制移动到目标
+    backend.checkout_branch(&sa, "main").unwrap();
+    assert!(backend
+        .checkout(
+            &sa,
+            &CheckoutOptions {
+                track: true,
+                ..co(CheckoutTargetKind::Branch, "origin/topic")
+            },
+        )
+        .is_err());
+    let o = backend
+        .checkout(
+            &sa,
+            &CheckoutOptions {
+                track: true,
+                override_existing: true,
+                ..co(CheckoutTargetKind::Branch, "origin/topic")
+            },
+        )
+        .unwrap();
+    assert_eq!(o.created_branch.as_deref(), Some("topic"));
+}
+
+#[test]
+fn checkout_create_new_branch_at_target_with_override() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // main 先前进一个提交，使 main~1（初始提交）存在
+    advance_main(backend.as_ref(), &session, &dir.0);
+
+    // 在 main~1 处新建分支并检出
+    let o = backend
+        .checkout(
+            &session,
+            &CheckoutOptions {
+                create_branch: Some("from-past".to_string()),
+                ..co(CheckoutTargetKind::Commit, "main~1")
+            },
+        )
+        .unwrap();
+    assert!(!o.detached);
+    assert_eq!(o.created_branch.as_deref(), Some("from-past"));
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("from-past"));
+    assert_eq!(st.head.map(|h| h.summary), Some("initial".to_string()));
+
+    // main 前进后：同名分支已存在 → 拒绝；override → 强制移动到 main
+    backend.checkout_branch(&session, "main").unwrap();
+    advance_main(backend.as_ref(), &session, &dir.0);
+    assert!(backend
+        .checkout(
+            &session,
+            &CheckoutOptions {
+                create_branch: Some("from-past".to_string()),
+                ..co(CheckoutTargetKind::Branch, "main")
+            },
+        )
+        .is_err());
+    let o = backend
+        .checkout(
+            &session,
+            &CheckoutOptions {
+                create_branch: Some("from-past".to_string()),
+                override_existing: true,
+                ..co(CheckoutTargetKind::Branch, "main")
+            },
+        )
+        .unwrap();
+    assert_eq!(o.created_branch.as_deref(), Some("from-past"));
+    let list = backend.branches(&session).unwrap();
+    let from_past = list.iter().find(|b| b.name == "from-past").unwrap();
+    let main = list.iter().find(|b| b.name == "main").unwrap();
+    assert_eq!(from_past.short_id, main.short_id);
+}
+
+#[test]
+fn checkout_merge_carries_local_changes_without_conflict() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // addfile 分支只新增 extra.txt（不动 README）
+    backend.create_branch(&session, "addfile", None).unwrap();
+    backend.checkout_branch(&session, "addfile").unwrap();
+    write(&dir.0.join("extra.txt"), "extra\n");
+    backend.stage(&session, &[dir.0.join("extra.txt")]).unwrap();
+    backend.commit(&session, "add extra", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+
+    // 本地修改 README（目标分支未触碰）→ merge 携带切换，无冲突
+    write(&dir.0.join("README.md"), "# dirty\n");
+    let o = backend
+        .checkout(
+            &session,
+            &CheckoutOptions {
+                merge: true,
+                ..co(CheckoutTargetKind::Branch, "addfile")
+            },
+        )
+        .unwrap();
+    assert!(!o.conflicted);
+    // 携带的修改仍在，目标分支的新文件已检出
+    assert_eq!(
+        fs::read_to_string(dir.0.join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "# dirty\n"
+    );
+    assert!(dir.0.join("extra.txt").exists());
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("addfile"));
+}
+
+#[test]
+fn checkout_merge_conflict_leaves_conflict_state() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // other 分支修改 README 并提交
+    backend.create_branch(&session, "other", None).unwrap();
+    backend.checkout_branch(&session, "other").unwrap();
+    write(&dir.0.join("README.md"), "# other\n");
+    backend.stage(&session, &[dir.0.join("README.md")]).unwrap();
+    backend.commit(&session, "on other", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+
+    // main 上本地未提交修改同一文件 → merge 切换产生冲突
+    write(&dir.0.join("README.md"), "# dirty\n");
+    let o = backend
+        .checkout(
+            &session,
+            &CheckoutOptions {
+                merge: true,
+                ..co(CheckoutTargetKind::Branch, "other")
+            },
+        )
+        .unwrap();
+    assert!(o.conflicted);
+    // 仓库处于冲突状态，待解决
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    assert!(repo.index().unwrap().has_conflicts());
+    // 已在目标分支上
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("other"));
+}
+
+#[test]
+fn checkout_force_overwrites_local_changes() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+    advance_main(backend.as_ref(), &session, &dir.0);
+
+    // 本地修改 README 后切到旧提交：默认被拒（DirtyWorktree）
+    write(&dir.0.join("README.md"), "# dirty\n");
+    let err = backend
+        .checkout(&session, &co(CheckoutTargetKind::Commit, "main~1"))
+        .unwrap_err();
+    assert_eq!(err.code, higit_git::error::ErrorCode::DirtyWorktree);
+    assert_eq!(
+        fs::read_to_string(dir.0.join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "# dirty\n"
+    );
+
+    // force：覆盖本地修改完成检出
+    let o = backend
+        .checkout(
+            &session,
+            &CheckoutOptions {
+                force: true,
+                ..co(CheckoutTargetKind::Commit, "main~1")
+            },
+        )
+        .unwrap();
+    assert!(o.detached);
+    assert_eq!(
+        fs::read_to_string(dir.0.join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "# fixture\n"
+    );
+}
+
+// ---------- 增强合并（FR-7.6：no-ff / ff-only / no-commit / squash / 消息 / ours） ----------
+
+use higit_git::model::MergeOptions;
+
+/// 仅指定来源分支的 MergeOptions（其余选项默认关闭）
+fn mo(source: &str) -> MergeOptions {
+    MergeOptions {
+        kind: CheckoutTargetKind::Branch,
+        source: source.to_string(),
+        ..Default::default()
+    }
+}
+
+/// fixture：main 与 feature 自初始提交分叉（main 加 main.txt；feature 加 feature.txt /
+/// feature2.txt），三方合并无冲突。结束时停在 main。
+fn diverged_clean(
+    backend: &dyn higit_git::engine::GitEngine,
+    session: &higit_git::engine::RepoSession,
+    dir: &Path,
+) {
+    backend.create_branch(session, "feature", None).unwrap();
+    write(&dir.join("main.txt"), "main\n");
+    backend.stage(session, &[dir.join("main.txt")]).unwrap();
+    backend.commit(session, "m1", None).unwrap();
+    backend.checkout_branch(session, "feature").unwrap();
+    write(&dir.join("feature.txt"), "f1\n");
+    backend.stage(session, &[dir.join("feature.txt")]).unwrap();
+    backend.commit(session, "f1", None).unwrap();
+    write(&dir.join("feature2.txt"), "f2\n");
+    backend.stage(session, &[dir.join("feature2.txt")]).unwrap();
+    backend.commit(session, "f2", None).unwrap();
+    backend.checkout_branch(session, "main").unwrap();
+}
+
+#[test]
+fn merge_no_ff_forces_merge_commit_and_clears_merge_head() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // 默认：可快进 → 快进
+    backend.create_branch(&session, "feature", None).unwrap();
+    backend.checkout_branch(&session, "feature").unwrap();
+    write(&dir.0.join("feature.txt"), "f1\n");
+    backend.stage(&session, &[dir.0.join("feature.txt")]).unwrap();
+    backend.commit(&session, "f1", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+    let o = backend.merge(&session, &mo("feature")).unwrap();
+    assert!(o.fast_forward && o.updated);
+
+    // 再造一个可快进来源，no_ff 强制产生合并提交
+    backend.create_branch(&session, "next", None).unwrap();
+    backend.checkout_branch(&session, "next").unwrap();
+    write(&dir.0.join("next.txt"), "n1\n");
+    backend.stage(&session, &[dir.0.join("next.txt")]).unwrap();
+    backend.commit(&session, "n1", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                no_ff: true,
+                ..mo("next")
+            },
+        )
+        .unwrap();
+    assert!(!o.fast_forward);
+    assert!(o.updated);
+    assert!(o.created_commit.is_some());
+
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2);
+    assert_eq!(head.summary().unwrap(), Some("Merge branch 'next'"));
+    // 合并状态已清理：MERGE_HEAD 不存在，下一次普通提交是单亲
+    assert!(repo.find_reference("MERGE_HEAD").is_err());
+    write(&dir.0.join("after.txt"), "after\n");
+    backend.stage(&session, &[dir.0.join("after.txt")]).unwrap();
+    backend.commit(&session, "after merge", None).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 1);
+    assert!(dir.0.join("next.txt").exists());
+}
+
+#[test]
+fn merge_ff_only_aborts_when_not_fast_forwardable() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+    diverged_clean(backend.as_ref(), &session, &dir.0);
+
+    // 已分叉：ff-only 被拒
+    let err = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                ff_only: true,
+                ..mo("feature")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code, higit_git::error::ErrorCode::Diverged);
+
+    // 可快进来源：ff-only 成功快进
+    backend.create_branch(&session, "next", None).unwrap();
+    backend.checkout_branch(&session, "next").unwrap();
+    write(&dir.0.join("next.txt"), "n1\n");
+    backend.stage(&session, &[dir.0.join("next.txt")]).unwrap();
+    backend.commit(&session, "n1", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                ff_only: true,
+                ..mo("next")
+            },
+        )
+        .unwrap();
+    assert!(o.fast_forward && o.updated);
+}
+
+#[test]
+fn merge_squash_stages_changes_without_commit() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    backend.create_branch(&session, "feature", None).unwrap();
+    backend.checkout_branch(&session, "feature").unwrap();
+    write(&dir.0.join("feature.txt"), "f1\n");
+    backend.stage(&session, &[dir.0.join("feature.txt")]).unwrap();
+    backend.commit(&session, "f1", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                squash: true,
+                ..mo("feature")
+            },
+        )
+        .unwrap();
+    // 未产生提交：HEAD 与分支都停在初始提交；变更已暂存
+    assert!(o.pending_commit);
+    assert!(!o.updated);
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.head.map(|h| h.summary), Some("initial".to_string()));
+    assert_eq!(st.branch.as_deref(), Some("main"));
+    assert_eq!(
+        st.entries
+            .iter()
+            .find(|e| e.path == Path::new("feature.txt"))
+            .map(|e| e.kind),
+        Some(FileStatusKind::Staged)
+    );
+    // squash 不设置 MERGE_HEAD
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    assert!(repo.find_reference("MERGE_HEAD").is_err());
+
+    // 手动提交：单亲提交（squash 语义）
+    backend.commit(&session, "squashed", None).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 1);
+    assert!(dir.0.join("feature.txt").exists());
+}
+
+#[test]
+fn merge_squash_conflict_keeps_conflict_without_merge_head() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // main 与 feature 各自修改 README → squash 合并冲突
+    backend.create_branch(&session, "feature", None).unwrap();
+    write(&dir.0.join("README.md"), "# on main\n");
+    backend.stage(&session, &[dir.0.join("README.md")]).unwrap();
+    backend.commit(&session, "m1", None).unwrap();
+    backend.checkout_branch(&session, "feature").unwrap();
+    write(&dir.0.join("README.md"), "# on feature\n");
+    backend.stage(&session, &[dir.0.join("README.md")]).unwrap();
+    backend.commit(&session, "f1", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                squash: true,
+                ..mo("feature")
+            },
+        )
+        .unwrap();
+    assert!(!o.conflicts.is_empty());
+    // squash 冲突不保留 MERGE_HEAD，但冲突状态在索引中
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    assert!(repo.find_reference("MERGE_HEAD").is_err());
+    assert!(repo.index().unwrap().has_conflicts());
+}
+
+#[test]
+fn merge_no_commit_leaves_pending_merge_state() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+    diverged_clean(backend.as_ref(), &session, &dir.0);
+
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                no_commit: true,
+                ..mo("feature")
+            },
+        )
+        .unwrap();
+    assert!(o.pending_commit);
+    assert!(o.conflicts.is_empty());
+    // HEAD 未动；MERGE_HEAD / MERGE_MSG 就位
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.head.map(|h| h.summary), Some("m1".to_string()));
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    assert!(repo.find_reference("MERGE_HEAD").is_ok());
+    let merge_msg = fs::read_to_string(repo.path().join("MERGE_MSG")).unwrap();
+    assert!(merge_msg.contains("Merge branch 'feature'"));
+    assert!(dir.0.join("feature.txt").exists());
+
+    // 随后手动提交：MERGE_HEAD 被识别，落成双亲合并提交
+    backend.commit(&session, "finish merge", None).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2);
+}
+
+#[test]
+fn merge_custom_message_and_log_messages() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+    diverged_clean(backend.as_ref(), &session, &dir.0);
+
+    // 自动消息 + merge.log：附加被合并侧提交摘要
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                log_messages: 10,
+                ..mo("feature")
+            },
+        )
+        .unwrap();
+    assert!(o.created_commit.is_some());
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.summary().unwrap(), Some("Merge branch 'feature'"));
+    let msg = head.message().unwrap();
+    assert!(msg.contains("* feature:"), "log section missing: {msg}");
+    assert!(msg.contains("f2"), "newest merged commit missing: {msg}");
+
+    // 自定义消息覆盖自动生成
+    backend.create_branch(&session, "next", None).unwrap();
+    backend.checkout_branch(&session, "next").unwrap();
+    write(&dir.0.join("next.txt"), "n1\n");
+    backend.stage(&session, &[dir.0.join("next.txt")]).unwrap();
+    backend.commit(&session, "n1", None).unwrap();
+    backend.checkout_branch(&session, "main").unwrap();
+    let o = backend
+        .merge(
+            &session,
+            &MergeOptions {
+                no_ff: true,
+                message: Some("custom merge".to_string()),
+                ..mo("next")
+            },
+        )
+        .unwrap();
+    assert!(o.created_commit.is_some());
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.summary().unwrap(), Some("custom merge"));
+}
+
+#[test]
+fn merge_remote_branch_and_ours_strategy() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    // 建 topic 推送到远端
+    backend.create_branch(&sa, "topic", None).unwrap();
+    backend.checkout_branch(&sa, "topic").unwrap();
+    write(&a.0.join("topic.txt"), "topic\n");
+    backend.stage(&sa, &[a.0.join("topic.txt")]).unwrap();
+    backend.commit(&sa, "topic work", None).unwrap();
+    backend.push(&sa, "topic", None, &|_| {}, &token).unwrap();
+    backend.fetch(&sa, "", None, &|_| {}, &token).unwrap();
+    backend.checkout_branch(&sa, "main").unwrap();
+    // main 前进避免快进
+    write(&a.0.join("main-side.txt"), "m\n");
+    backend.stage(&sa, &[a.0.join("main-side.txt")]).unwrap();
+    backend.commit(&sa, "m1", None).unwrap();
+
+    // 合并远端分支 origin/topic：三方合并提交，消息用 remote-tracking 格式
+    let o = backend.merge(&sa, &mo("origin/topic")).unwrap();
+    assert!(!o.fast_forward);
+    assert!(o.updated);
+    assert!(o.created_commit.is_some());
+    let repo = git2::Repository::open(&a.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2);
+    assert_eq!(
+        head.summary().unwrap(),
+        Some("Merge remote-tracking branch 'origin/topic'")
+    );
+    assert!(a.0.join("topic.txt").exists());
+
+    // -s ours：产生记录合并关系的提交，但内容保持当前分支
+    backend.create_branch(&sa, "incoming", None).unwrap();
+    backend.checkout_branch(&sa, "incoming").unwrap();
+    write(&a.0.join("incoming.txt"), "x\n");
+    backend.stage(&sa, &[a.0.join("incoming.txt")]).unwrap();
+    backend.commit(&sa, "incoming work", None).unwrap();
+    backend.checkout_branch(&sa, "main").unwrap();
+    let o = backend
+        .merge(
+            &sa,
+            &MergeOptions {
+                strategy: "ours".to_string(),
+                ..mo("incoming")
+            },
+        )
+        .unwrap();
+    assert!(o.updated);
+    assert!(o.created_commit.is_some());
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2);
+    // ours：incoming 的变更不进入工作区
+    assert!(!a.0.join("incoming.txt").exists());
+}
+
+// ---------- 提交对话框增强（Amend+路径 / 提交到新分支 / 行级统计） ----------
+
+#[test]
+fn commit_amend_partial_only_takes_given_paths() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // 第二次提交：app.rs v1
+    write(&dir.0.join("app.rs"), "v1\n");
+    backend.stage(&session, &[dir.0.join("app.rs")]).unwrap();
+    backend.commit(&session, "second", None).unwrap();
+
+    // app.rs v2（修补进去）；README 再改（不纳入修补）
+    write(&dir.0.join("app.rs"), "v2\n");
+    write(&dir.0.join("README.md"), "# dirty\n");
+
+    backend
+        .commit_amend_partial(
+            &session,
+            "second amended",
+            None,
+            &["app.rs".to_string()],
+        )
+        .unwrap();
+
+    let repo = git2::Repository::open(&dir.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.summary().unwrap(), Some("second amended"));
+    // 单亲提交，父提交仍为 initial（amend 替换而非新增）
+    assert_eq!(head.parent_count(), 1);
+    assert_eq!(head.parent(0).unwrap().summary().unwrap(), Some("initial"));
+    // 修补后的树：app.rs 为 v2，README 保持原始内容
+    let tree = head.tree().unwrap();
+    let app = repo
+        .find_blob(tree.get_path(Path::new("app.rs")).unwrap().id())
+        .unwrap();
+    assert_eq!(app.content(), b"v2\n");
+    let readme = repo
+        .find_blob(tree.get_path(Path::new("README.md")).unwrap().id())
+        .unwrap();
+    assert_eq!(readme.content(), b"# fixture\n");
+}
+
+#[test]
+fn switch_head_lands_commit_on_new_branch_only() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+    let initial_short = backend.status(&session, &StatusOpts::default()).unwrap()
+        .head
+        .map(|h| h.short_id)
+        .unwrap();
+
+    backend.create_branch(&session, "dev", None).unwrap();
+    backend.switch_head(&session, "dev").unwrap();
+    let st = backend.status(&session, &StatusOpts::default()).unwrap();
+    assert_eq!(st.branch.as_deref(), Some("dev"));
+
+    // 提交落到 dev，main 停在原提交
+    write(&dir.0.join("app.rs"), "on dev\n");
+    backend.stage(&session, &[dir.0.join("app.rs")]).unwrap();
+    backend.commit(&session, "on dev", None).unwrap();
+    let list = backend.branches(&session).unwrap();
+    let dev = list.iter().find(|b| b.name == "dev").unwrap();
+    let main = list.iter().find(|b| b.name == "main").unwrap();
+    assert!(dev.is_current);
+    assert_ne!(dev.short_id, main.short_id);
+    assert_eq!(main.short_id, initial_short);
+
+    // 不存在的分支：明确报错
+    assert!(backend.switch_head(&session, "nope").is_err());
+}
+
+#[test]
+fn change_stats_reports_line_counts() {
+    let dir = temp_repo();
+    init_with_commit(&dir.0);
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let session = backend.open(&dir.0).unwrap();
+
+    // 再提交一个 2 行文件，随后删除 → -2
+    write(&dir.0.join("del.txt"), "x\ny\n");
+    backend.stage(&session, &[dir.0.join("del.txt")]).unwrap();
+    backend.commit(&session, "third", None).unwrap();
+    std::fs::remove_file(dir.0.join("del.txt")).unwrap();
+
+    // 修改：1 行 → 3 行（+2）；新增：3 行（+3）；删除：-2
+    write(&dir.0.join("README.md"), "# fixture\na\nb\n");
+    write(&dir.0.join("app.rs"), "1\n2\n3\n");
+
+    let stats = backend
+        .change_stats(
+            &session,
+            &[
+                "README.md".to_string(),
+                "app.rs".to_string(),
+                "del.txt".to_string(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(stats[0], (Some(2), Some(0)), "modified README");
+    assert_eq!(stats[1], (Some(3), Some(0)), "added app.rs");
+    assert_eq!(stats[2], (Some(0), Some(2)), "deleted del.txt");
+
+    // 文件数超上限：整体跳过（全 None），不产生 diff 开销
+    let many: Vec<String> = (0..201).map(|i| format!("f{i}.txt")).collect();
+    let stats = backend.change_stats(&session, &many).unwrap();
+    assert_eq!(stats.len(), 201);
+    assert!(stats.iter().all(|(a, d)| a.is_none() && d.is_none()));
+}
+
+// ---------- 增强拉取（FR-5.1 扩展：no-ff / no-commit / squash / rebase / prune / tags） ----------
+
+use higit_git::engine::PullOptions;
+
+/// 默认关闭 ff_only（拉取对话框显式传选项时的基线；引擎 Default 保留旧版 ff-only 行为）
+fn po() -> PullOptions {
+    PullOptions {
+        ff_only: false,
+        ..Default::default()
+    }
+}
+
+/// b 克隆提交并推送一次（main 前进）
+fn push_from_b(
+    backend: &dyn higit_git::engine::GitEngine,
+    sb: &higit_git::engine::RepoSession,
+    b: &Path,
+    name: &str,
+) {
+    write(&b.join(name), "from b\n");
+    backend.stage(sb, &[b.join(name)]).unwrap();
+    backend.commit(sb, "from b", None).unwrap();
+    backend
+        .push(sb, "main", None, &|_| {}, &higit_git::engine::CancelToken::default())
+        .unwrap();
+}
+
+fn silent_event(_ev: higit_git::engine::SyncEvent) {}
+
+#[test]
+fn pull_options_no_ff_creates_merge_commit() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    push_from_b(backend.as_ref(), &sb, &b.0, "feature.txt");
+
+    // a 本地提交（分叉）后 no_ff 拉取：产生合并提交而非快进
+    write(&a.0.join("local.txt"), "local\n");
+    backend.stage(&sa, &[a.0.join("local.txt")]).unwrap();
+    backend.commit(&sa, "local work", None).unwrap();
+
+    let o = backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                no_ff: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap();
+    assert!(o.updated);
+    assert!(!o.fast_forward);
+    assert!(a.0.join("feature.txt").exists());
+    let repo = git2::Repository::open(&a.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2);
+    assert_eq!(
+        head.summary().unwrap(),
+        Some("Merge remote-tracking branch 'origin/main'")
+    );
+}
+
+#[test]
+fn pull_options_squash_stages_without_commit() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    push_from_b(backend.as_ref(), &sb, &b.0, "feature.txt");
+
+    // 可快进 + squash：变更进入暂存区，HEAD 不动、无 MERGE_HEAD
+    let o = backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                squash: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap();
+    assert!(o.pending_commit);
+    assert!(!o.updated);
+    let st = backend.status(&sa, &StatusOpts::default()).unwrap();
+    assert_eq!(st.head.map(|h| h.summary), Some("seed".to_string()));
+    assert_eq!(
+        st.entries
+            .iter()
+            .find(|e| e.path == Path::new("feature.txt"))
+            .map(|e| e.kind),
+        Some(FileStatusKind::Staged)
+    );
+    let repo = git2::Repository::open(&a.0).unwrap();
+    assert!(repo.find_reference("MERGE_HEAD").is_err());
+}
+
+#[test]
+fn pull_options_no_commit_keeps_merge_state() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    push_from_b(backend.as_ref(), &sb, &b.0, "feature.txt");
+
+    // a 本地提交（分叉）后 no_commit 拉取：合并就绪但未提交
+    write(&a.0.join("local.txt"), "local\n");
+    backend.stage(&sa, &[a.0.join("local.txt")]).unwrap();
+    backend.commit(&sa, "local work", None).unwrap();
+
+    let o = backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                no_commit: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap();
+    assert!(o.pending_commit);
+    assert!(!o.updated);
+    let repo = git2::Repository::open(&a.0).unwrap();
+    assert!(repo.find_reference("MERGE_HEAD").is_ok());
+    let msg = fs::read_to_string(repo.path().join("MERGE_MSG")).unwrap();
+    assert!(msg.contains("Merge remote-tracking branch 'origin/main'"));
+
+    // 手动提交落成双亲合并提交
+    backend.commit(&sa, "finish pull merge", None).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.parent_count(), 2);
+}
+
+#[test]
+fn pull_options_rebase_replays_local_commits() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    push_from_b(backend.as_ref(), &sb, &b.0, "feature.txt");
+    // 远端最新提交以 b 的 HEAD 为准（a 的跟踪引用在拉取前是陈旧的）
+    let remote_tip = {
+        let repo = git2::Repository::open(&b.0).unwrap();
+        repo.head().unwrap().target().unwrap()
+    };
+
+    // a 两个本地提交（与远端分叉）
+    for (name, file) in [("a1", "one.txt"), ("a2", "two.txt")] {
+        write(&a.0.join(file), "local\n");
+        backend.stage(&sa, &[a.0.join(file)]).unwrap();
+        backend.commit(&sa, name, None).unwrap();
+    }
+
+    let o = backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                rebase: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap();
+    assert!(o.updated);
+    assert_eq!(o.rebased, 2);
+    let repo = git2::Repository::open(&a.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    // 线性历史：HEAD → a2' → a1' → 远端最新
+    assert_eq!(head.summary().unwrap(), Some("a2"));
+    let p1 = head.parent(0).unwrap();
+    assert_eq!(p1.summary().unwrap(), Some("a1"));
+    assert_eq!(p1.parent(0).unwrap().id(), remote_tip);
+    // 远端文件已在工作区
+    assert!(a.0.join("feature.txt").exists());
+    assert!(a.0.join("one.txt").exists());
+}
+
+#[test]
+fn pull_options_rebase_conflict_aborts_and_restores() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    // b 改 README 并推送
+    write(&b.0.join("README.md"), "# from b\n");
+    backend.stage(&sb, &[b.0.join("README.md")]).unwrap();
+    backend.commit(&sb, "from b", None).unwrap();
+    backend.push(&sb, "main", None, &|_| {}, &token).unwrap();
+
+    // a 改同一文件（分叉冲突）后变基拉取 → 冲突中止并恢复原状
+    write(&a.0.join("README.md"), "# local a\n");
+    backend.stage(&sa, &[a.0.join("README.md")]).unwrap();
+    backend.commit(&sa, "local a", None).unwrap();
+    let local_tip = {
+        let repo = git2::Repository::open(&a.0).unwrap();
+        repo.head().unwrap().peel_to_commit().unwrap().id()
+    };
+
+    let err = backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                rebase: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, higit_git::error::ErrorCode::MergeConflict);
+
+    // 原状恢复：HEAD 仍在本地提交、工作区是本地内容、无残留变基状态
+    let repo = git2::Repository::open(&a.0).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(head.id(), local_tip);
+    assert_eq!(
+        fs::read_to_string(a.0.join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "# local a\n"
+    );
+    assert!(repo.find_reference("MERGE_HEAD").is_err());
+    assert!(!repo.path().join("rebase-merge").exists());
+}
+
+#[test]
+fn pull_options_prune_removes_deleted_remote_branch_ref() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    // a 建 topic 并推送（建立上游与远端引用），随后在裸远端删除 topic
+    backend.create_branch(&sa, "topic", None).unwrap();
+    backend.checkout_branch(&sa, "topic").unwrap();
+    write(&a.0.join("topic.txt"), "t\n");
+    backend.stage(&sa, &[a.0.join("topic.txt")]).unwrap();
+    backend.commit(&sa, "topic work", None).unwrap();
+    backend.push(&sa, "topic", None, &|_| {}, &token).unwrap();
+    backend.checkout_branch(&sa, "main").unwrap();
+    let bare = git2::Repository::open_bare(&remote.0).unwrap();
+    bare.find_reference("refs/heads/topic").unwrap().delete().unwrap();
+
+    // prune 拉取：远端跟踪引用 origin/topic 被清理（prune 覆盖整个远端）
+    backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                prune: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap();
+    let repo = git2::Repository::open(&a.0).unwrap();
+    assert!(repo.find_reference("refs/remotes/origin/topic").is_err());
+    assert!(repo.find_reference("refs/remotes/origin/main").is_ok());
+}
+
+#[test]
+fn pull_options_all_tags_fetches_unreachable_tags() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    // b：hidden 分支提交 + 打标签 v9，仅推送标签（该提交对 main 不可达）
+    backend.create_branch(&sb, "hidden", None).unwrap();
+    backend.checkout_branch(&sb, "hidden").unwrap();
+    write(&b.0.join("hidden.txt"), "h\n");
+    backend.stage(&sb, &[b.0.join("hidden.txt")]).unwrap();
+    backend.commit(&sb, "hidden work", None).unwrap();
+    {
+        let repo = git2::Repository::open(&b.0).unwrap();
+        let oid = repo.head().unwrap().target().unwrap();
+        repo.reference("refs/tags/v9", oid, false, "v9").unwrap();
+        // push_multi 按分支名归一 refspec，标签直接经 git2 推送
+        let mut remote = repo.find_remote("origin").unwrap();
+        remote.push(&["refs/tags/v9:refs/tags/v9"], None).unwrap();
+    }
+
+    // 默认拉取：不可达标签不会被自动跟随
+    backend
+        .pull_options(&sa, "main", &po(), None, None, Some(&silent_event), &token)
+        .unwrap();
+    {
+        let repo = git2::Repository::open(&a.0).unwrap();
+        assert!(repo.find_reference("refs/tags/v9").is_err());
+    }
+
+    // all_tags：显式抓取全部标签
+    backend
+        .pull_options(
+            &sa,
+            "main",
+            &PullOptions {
+                all_tags: true,
+                ..po()
+            },
+            None,
+            None,
+            Some(&silent_event),
+            &token,
+        )
+        .unwrap();
+    let repo = git2::Repository::open(&a.0).unwrap();
+    assert!(repo.find_reference("refs/tags/v9").is_ok());
+}

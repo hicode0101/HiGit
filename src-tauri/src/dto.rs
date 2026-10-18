@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use higit_git::model::{
-    BranchInfo, CleanOptions, CleanOutcome, CleanMode, CommitDetail, CommitEntry, CommitFile,
-    CommitFileKind, DiffLine, DiffLineOrigin, FileStatusKind, Identity, MergeOutcome, RepoStatus,
+    BranchInfo, CheckoutOptions, CheckoutOutcome, CheckoutTargetKind, CleanOptions, CleanOutcome,
+    CleanMode, CommitDetail, CommitEntry, CommitFile, CommitFileKind, DiffLine, DiffLineOrigin,
+    FileStatusKind, Identity, MergeOptions, MergeOutcome, MergeResult, RepoStatus, TagInfo,
     TextDiff,
 };
 
@@ -392,6 +393,158 @@ impl MergeOutcomeDto {
             fast_forward: m.fast_forward,
             updated: m.updated,
             conflicts: m.conflicts.iter().map(|p| rel_string(p)).collect(),
+        }
+    }
+}
+
+/// 增强合并请求（FR-7.6，合并分支对话框提交）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeOptsDto {
+    /// "branch" | "tag" | "commit"
+    pub kind: String,
+    /// 分支名（本地或远端 "origin/x"）/ 标签名 / 提交 hash 或 revparse 表达式
+    pub source: String,
+    #[serde(default)]
+    pub no_ff: bool,
+    #[serde(default)]
+    pub ff_only: bool,
+    #[serde(default)]
+    pub no_commit: bool,
+    #[serde(default)]
+    pub squash: bool,
+    /// 合并提交消息：None/空 = 自动生成
+    #[serde(default)]
+    pub message: Option<String>,
+    /// 自动消息附加被合并侧最近 N 条提交摘要（merge.log；0 = 不附加）
+    #[serde(default)]
+    pub log_messages: u32,
+    /// 合并策略："" = 默认；"ours" = 结果树取当前分支（git merge -s ours）
+    #[serde(default)]
+    pub strategy: String,
+}
+
+impl MergeOptsDto {
+    pub fn to_model(&self) -> MergeOptions {
+        MergeOptions {
+            kind: match self.kind.as_str() {
+                "tag" => CheckoutTargetKind::Tag,
+                "commit" => CheckoutTargetKind::Commit,
+                _ => CheckoutTargetKind::Branch,
+            },
+            source: self.source.clone(),
+            no_ff: self.no_ff,
+            ff_only: self.ff_only,
+            no_commit: self.no_commit,
+            squash: self.squash,
+            message: self.message.clone().filter(|s| !s.trim().is_empty()),
+            log_messages: self.log_messages,
+            strategy: self.strategy.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResultDto {
+    pub fast_forward: bool,
+    pub updated: bool,
+    pub conflicts: Vec<String>,
+    /// 合并完成但未创建提交（--no-commit / --squash）：等待用户手动提交
+    pub pending_commit: bool,
+    /// 本次创建的合并提交
+    pub created_commit: Option<String>,
+}
+
+impl MergeResultDto {
+    pub fn from_model(m: &MergeResult) -> Self {
+        Self {
+            fast_forward: m.fast_forward,
+            updated: m.updated,
+            conflicts: m.conflicts.iter().map(|p| rel_string(p)).collect(),
+            pending_commit: m.pending_commit,
+            created_commit: m.created_commit.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagDto {
+    pub name: String,
+    pub short_id: String,
+    pub last_commit_summary: String,
+}
+
+impl TagDto {
+    pub fn from_model(t: &TagInfo) -> Self {
+        Self {
+            name: t.name.clone(),
+            short_id: t.short_id.clone(),
+            last_commit_summary: t.last_commit_summary.clone(),
+        }
+    }
+}
+
+/// 增强检出请求（FR-7.5，切换分支对话框提交）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutOptsDto {
+    /// "branch" | "tag" | "commit"
+    pub kind: String,
+    /// 分支名（本地或远端 "origin/x"）/ 标签名 / 提交 hash 或 revparse 表达式
+    pub target: String,
+    #[serde(default)]
+    pub create_branch: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub merge: bool,
+    #[serde(default)]
+    pub track: bool,
+    #[serde(default)]
+    pub override_existing: bool,
+}
+
+impl CheckoutOptsDto {
+    pub fn to_model(&self) -> CheckoutOptions {
+        CheckoutOptions {
+            kind: match self.kind.as_str() {
+                "tag" => CheckoutTargetKind::Tag,
+                "commit" => CheckoutTargetKind::Commit,
+                _ => CheckoutTargetKind::Branch,
+            },
+            target: self.target.clone(),
+            create_branch: self
+                .create_branch
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string()),
+            force: self.force,
+            merge: self.merge,
+            track: self.track,
+            override_existing: self.override_existing,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutOutcomeDto {
+    /// 是否处于分离 HEAD（检出标签 / 提交，或远端分支且未跟踪）
+    pub detached: bool,
+    /// 本次新建并切换到的本地分支名
+    pub created_branch: Option<String>,
+    /// 携带的本地修改与目标分支冲突：冲突已写入工作区待解决
+    pub conflicted: bool,
+}
+
+impl CheckoutOutcomeDto {
+    pub fn from_model(o: &CheckoutOutcome) -> Self {
+        Self {
+            detached: o.detached,
+            created_branch: o.created_branch.clone(),
+            conflicted: o.conflicted,
         }
     }
 }
