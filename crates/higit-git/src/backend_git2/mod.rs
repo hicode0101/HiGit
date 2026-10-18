@@ -1951,6 +1951,11 @@ impl GitEngine for Git2Backend {
                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
             for item in remotes.flatten() {
                 let (branch, _) = item;
+                // origin/HEAD 等符号引用只是默认分支的别名（origin/HEAD -> origin/main），
+                // 不是可检出的实体分支；检出时会因保留名 "HEAD" 报错，这里直接跳过
+                if branch.get().kind() == Some(git2::ReferenceType::Symbolic) {
+                    continue;
+                }
                 if let Some(name) = branch.name().ok().flatten() {
                     let reference = branch.get();
                     let short = reference.target().map(short_id).unwrap_or_default();

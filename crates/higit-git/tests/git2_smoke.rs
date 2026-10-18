@@ -2594,3 +2594,27 @@ fn push_multi_to_arbitrary_url_pushes_to_anonymous_remote() {
         .upstream()
         .is_err());
 }
+
+// ---------- 分支列表 ----------
+
+#[test]
+fn branches_listing_excludes_symbolic_origin_head() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    // 克隆会创建符号引用 refs/remotes/origin/HEAD（默认分支的别名）：
+    // 引用本身存在，但分支列表中不出现，实体分支 origin/main 保留
+    let repo = git2::Repository::open(&a.0).unwrap();
+    assert!(repo.find_reference("refs/remotes/origin/HEAD").is_ok());
+    let names: Vec<String> = backend
+        .branches(&sa)
+        .unwrap()
+        .into_iter()
+        .map(|b| b.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "origin/main"));
+    assert!(!names.iter().any(|n| n == "origin/HEAD"));
+}
