@@ -147,12 +147,38 @@ pub struct PushOutcome {
 }
 
 /// 推送请求（推送对话框，FR-5.2 扩展）：显式 refspec + force。
-#[derive(Debug, Clone, Default)]
+/// 手动实现 Default：set_upstream 缺省 true 以保持既有行为（无上游自动跟踪）。
+#[derive(Debug, Clone)]
 pub struct PushRequest {
     /// (本地分支, 远端分支)；远端分支空串 = 与本地同名
     pub refspecs: Vec<(String, String)>,
     /// 强制推送（等价 `--force`）：远端分支将被本地覆盖
     pub force: bool,
+    /// 目标远端名；空 = 自动解析（上游远端 → origin → 第一个）
+    pub remote: String,
+    /// 任意 URL 推送（优先于 remote，等价推到匿名远端）；无跟踪基准，不支持安全强制
+    pub remote_url: String,
+    /// 安全强制（`--force-with-lease`）：远端分支仍与本地跟踪引用一致才推送；
+    /// 检查在推送前进行（libgit2 推送无内建 lease 支持）
+    pub force_with_lease: bool,
+    /// 同时推送所有本地标签（`--tags`）
+    pub tags: bool,
+    /// 本地分支无上游时建立到所推远端分支的跟踪（`-u`）
+    pub set_upstream: bool,
+}
+
+impl Default for PushRequest {
+    fn default() -> Self {
+        Self {
+            refspecs: Vec::new(),
+            force: false,
+            remote: String::new(),
+            remote_url: String::new(),
+            force_with_lease: false,
+            tags: false,
+            set_upstream: true,
+        }
+    }
 }
 
 /// 同步过程事件（推送 / 拉取 / 抓取对话框的详细日志）。
@@ -332,6 +358,11 @@ pub trait GitEngine: Send + Sync {
     /// 解析同步远端（上游远端 → origin → 第一个远端），返回 (名称, URL)；仓库无远端时 None。
     fn sync_remote(&self, _session: &RepoSession) -> Result<Option<(String, String)>> {
         Err(HigitError::not_implemented("sync_remote"))
+    }
+
+    /// 仓库配置的所有远端 (名称, URL)（推送对话框的目标远端选择）。
+    fn remotes(&self, _session: &RepoSession) -> Result<Vec<(String, String)>> {
+        Err(HigitError::not_implemented("remotes"))
     }
 
     /// 推送预览（推送对话框）：本地分支将上传到远端分支的提交数与涉及文件；

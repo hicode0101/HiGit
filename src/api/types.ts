@@ -362,12 +362,20 @@ export interface SyncBranchDto {
   behind: number;
 }
 
+/** 同步对话框的远端选项（名称 + URL，推送对话框目标选择用） */
+export interface SyncRemoteDto {
+  name: string;
+  url: string;
+}
+
 /** 同步对话框数据：仓库信息 + 远端 + 分支列表 */
 export interface SyncPreviewDto {
   name: string;
   path: string;
   remoteName: string;
   url: string;
+  /** 配置的所有远端 */
+  remotes: SyncRemoteDto[];
   branches: SyncBranchDto[];
   remoteBranches: string[];
 }

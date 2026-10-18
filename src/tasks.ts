@@ -255,6 +255,16 @@ export type SyncJobReq = {
   branch?: string;
   /** push：强制推送 */
   force?: boolean;
+  /** push：目标远端名（空 = 自动解析） */
+  pushRemote?: string;
+  /** push：任意 URL 推送（优先于 pushRemote） */
+  pushUrl?: string;
+  /** push：安全强制（--force-with-lease，与 force 互斥） */
+  forceWithLease?: boolean;
+  /** push：同时推送所有本地标签（--tags） */
+  pushTags?: boolean;
+  /** push：无上游时建立跟踪（缺省 true 保持既有行为） */
+  setUpstream?: boolean;
   /** pull：TortoiseGit 式拉取选项（缺省 = 快进优先、分叉报错、不 prune） */
   pullOpts?: PullOptsDto | null;
   creds: SyncCreds | null;
@@ -268,6 +278,11 @@ export async function startSyncJob(req: SyncJobReq): Promise<number> {
     refspecs: req.refspecs ?? [],
     branch: req.branch ?? "",
     force: req.force ?? false,
+    pushRemote: req.pushRemote ?? "",
+    pushUrl: req.pushUrl ?? "",
+    forceWithLease: req.forceWithLease ?? false,
+    pushTags: req.pushTags ?? false,
+    setUpstream: req.setUpstream ?? true,
     pullOpts: req.pullOpts ?? null,
     creds: req.creds,
     remember: req.remember,

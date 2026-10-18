@@ -35,6 +35,16 @@ const selected = ref<string[]>([]);
 const targets = ref<Record<string, string>>({});
 const force = ref(false);
 
+// 推送目标（对应 TortoiseGit 的 Destination 区）：配置的远端 / 任意 URL
+const destMode = ref<"remote" | "url">("remote");
+const destRemote = ref("");
+const destUrl = ref("");
+// 推送选项（对应 TortoiseGit 的 Options 区）：安全强制 / 推送标签 / 设置上游
+// （设置上游默认不勾选，加载后按 TortoiseGit 语义补判：当前分支无上游时自动勾上）
+const pushLease = ref(false);
+const pushTags = ref(false);
+const pushSetUpstream = ref(false);
+
 // 拉取选项（对应 TortoiseGit Pull）：整合方式 + 合并选项 + prune / tags
 const pullRebase = ref(false);
 const pullNoFF = ref(false);
@@ -50,6 +60,14 @@ watch(pullNoFF, (v) => {
 });
 watch(pullFFOnly, (v) => {
   if (v) pullNoFF.value = false;
+});
+
+// 强制推送与安全强制互斥：安全强制同样覆盖远端，但先校验远端未被他人更新
+watch(force, (v) => {
+  if (v) pushLease.value = false;
+});
+watch(pushLease, (v) => {
+  if (v) force.value = false;
 });
 
 // 认证页 / Git 身份页（与克隆对话框一致；有改动才回写仓库设置）
@@ -99,10 +117,18 @@ const isSshUrl = computed(() => {
   return u.startsWith("git@") || u.startsWith("ssh://");
 });
 const noRemote = computed(() => !!preview.value && !preview.value.remoteName && !preview.value.url);
+/** 推送目标解析出的 URL：默认远端显示仓库设置覆盖后的地址，其余远端显示各自配置 */
+const destDisplayUrl = computed(() => {
+  if (!preview.value) return "";
+  if (destMode.value === "url") return destUrl.value.trim();
+  if (destRemote.value === preview.value.remoteName) return preview.value.url;
+  return preview.value.remotes.find((r) => r.name === destRemote.value)?.url ?? "";
+});
 const canStart = computed(
   () =>
     phase.value === "setup" &&
-    !noRemote.value &&
+    // 推送须目标就绪（远端名或任意 URL）；拉取 / 抓取须仓库已配置远端
+    (mode.value === "push" ? !!destDisplayUrl.value : !noRemote.value) &&
     (mode.value === "fetch" || selected.value.length > 0) &&
     identityComplete.value &&
     !identityEmailInvalid.value &&
@@ -184,10 +210,16 @@ onMounted(async () => {
   repoId.value = store.repos.find((r) => r.path === store.repoPath)?.id ?? "";
   try {
     preview.value = await api.syncPreview();
+    // 推送目标默认为解析出的远端（origin / 上游远端）
+    destRemote.value = preview.value.remoteName;
+    // 任意 URL 模式预填当前仓库地址，可直接修改
+    destUrl.value = preview.value.url;
     // 默认选中当前分支（push 可多选 / pull 单选；fetch 无需选择）
     if (mode.value !== "fetch") {
       const cur = preview.value.branches.find((b) => b.isCurrent) ?? preview.value.branches[0];
       if (cur) selected.value = [cur.name];
+      // 对应 TortoiseGit：当前分支尚无上游时默认勾选"设置上游"（推送即建立跟踪）
+      pushSetUpstream.value = !cur?.upstream;
     }
     const targetsMap: Record<string, string> = {};
     for (const b of preview.value.branches) targetsMap[b.name] = b.name;
@@ -328,10 +360,12 @@ async function doStart() {
       /* 尽力而为 */
     }
   }
-  // HTTPS 勾选"记住"且填了密码：写入系统凭证管理器
+  // HTTPS 勾选"记住"且填了密码：写入系统凭证管理器（推送时按所选目标远端取主机）
   const creds = buildCreds();
   if (rememberCred.value && creds?.kind === "http" && creds.password) {
-    const host = hostFromUrl(preview.value.url);
+    const host = hostFromUrl(
+      mode.value === "push" ? destDisplayUrl.value || preview.value.url : preview.value.url,
+    );
     if (host) void api.saveCredential(host, creds).catch(() => undefined);
   }
 
@@ -345,6 +379,11 @@ async function doStart() {
         remote: targets.value[local]?.trim() || local,
       })),
       force: force.value,
+      forceWithLease: pushLease.value,
+      pushTags: pushTags.value,
+      setUpstream: pushSetUpstream.value,
+      pushRemote: destMode.value === "remote" ? destRemote.value : "",
+      pushUrl: destMode.value === "url" ? destUrl.value.trim() : "",
     };
   } else if (mode.value === "pull") {
     payload = {
@@ -428,11 +467,36 @@ onUnmounted(() => {
 
       <!-- 版本信息 -->
       <div v-show="tab === 0">
-        <div class="form-row">
+        <!-- 推送：目标可选（配置的远端 / 任意 URL）；拉取 / 抓取沿用解析出的远端 -->
+        <div v-if="mode === 'push'" class="form-row">
+          <label>{{ urlLabel }}</label>
+          <div class="dest-row">
+            <label class="check-line dest-radio">
+              <input v-model="destMode" type="radio" value="remote" />
+              <span>{{ t("Remote") }}:</span>
+            </label>
+            <select v-model="destRemote" class="dest-select" :disabled="destMode !== 'remote'">
+              <option v-for="r in preview?.remotes ?? []" :key="r.name" :value="r.name">
+                {{ r.name }}
+              </option>
+            </select>
+          </div>
+          <div class="dest-row">
+            <label class="check-line dest-radio">
+              <input v-model="destMode" type="radio" value="url" />
+              <span>{{ t("Arbitrary URL") }}:</span>
+            </label>
+            <input v-model="destUrl" class="dest-url-input" :disabled="destMode !== 'url'" />
+          </div>
+          <div v-if="destMode === 'remote'" class="dest-hint">{{ destDisplayUrl || "—" }}</div>
+        </div>
+        <div v-else class="form-row">
           <label>{{ urlLabel }}</label>
           <div class="url-line">{{ preview?.url || "—" }}</div>
         </div>
-        <div v-if="noRemote" class="danger-hint">{{ t("No remote configured for this repository") }}</div>
+        <div v-if="noRemote && !destDisplayUrl" class="danger-hint">
+          {{ t("No remote configured for this repository") }}
+        </div>
 
         <!-- 推送：多选 + 目标远端分支 + Force -->
         <template v-if="mode === 'push'">
@@ -479,11 +543,42 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <label class="check-line force-line">
-            <input v-model="force" type="checkbox" />
-            <span>{{ t("Force push (overwrite remote branch)") }}</span>
-          </label>
-          <div v-if="force" class="danger-hint">
+          <!-- 推送选项（对应 TortoiseGit Push 的 Options 区） -->
+          <div class="sync-opts">
+            <div class="po-row">
+              <label
+                class="check-line"
+                :title="t('Overwrite the remote branch even if it has commits missing locally (git push --force)')"
+              >
+                <input v-model="force" type="checkbox" />
+                <span>{{ t("Force push (overwrite remote branch)") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :title="t('Push only if the remote branch is still at the last fetched state, so others\u2019 new commits are never overwritten (git push --force-with-lease)')"
+              >
+                <input v-model="pushLease" type="checkbox" />
+                <span>{{ t("Force with lease") }}</span>
+              </label>
+            </div>
+            <div class="po-row">
+              <label
+                class="check-line"
+                :title="t('Push all local tags along with the branches (git push --tags)')"
+              >
+                <input v-model="pushTags" type="checkbox" />
+                <span>{{ t("Include Tags") }}</span>
+              </label>
+              <label
+                class="check-line"
+                :title="t('When the local branch has no upstream, track the pushed remote branch (git push -u)')"
+              >
+                <input v-model="pushSetUpstream" type="checkbox" />
+                <span>{{ t("Set upstream / track remote branch") }}</span>
+              </label>
+            </div>
+          </div>
+          <div v-if="force || pushLease" class="danger-hint">
             {{ t("Force push overwrites the remote branch history. Replaced commits may be lost permanently and other collaborators will be affected. Make sure you understand the consequences.") }}
           </div>
         </template>
@@ -525,7 +620,7 @@ onUnmounted(() => {
           </div>
 
           <!-- 拉取选项（对应 TortoiseGit Pull 的 Option 区） -->
-          <div class="pull-opts">
+          <div class="sync-opts">
             <div class="po-row">
               <span class="po-label">{{ t("Integration") }}:</span>
               <label class="check-line">
@@ -880,8 +975,8 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* 拉取选项区（TortoiseGit Pull 的 Option 区） */
-.pull-opts {
+/* 选项区（TortoiseGit Pull / Push 对话框的 Option 区） */
+.sync-opts {
   margin-top: 10px;
   padding: 8px 10px;
   border: 1px solid var(--border-color);
@@ -907,8 +1002,35 @@ onUnmounted(() => {
   color: var(--text-disabled);
 }
 
-.force-line {
-  margin-top: 4px;
+/* 推送目标区（对应 TortoiseGit Push 的 Destination 区） */
+.dest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dest-radio {
+  flex: none;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dest-select,
+.dest-url-input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+.dest-hint {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-all;
+  margin-top: 2px;
 }
 
 .kind-row {

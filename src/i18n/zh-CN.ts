@@ -391,6 +391,19 @@ export const zhCN: Record<string, string> = {
   "Force push overwrites the remote branch history. Replaced commits may be lost permanently and other collaborators will be affected. Make sure you understand the consequences.":
     "强制推送会覆盖远端分支的历史，远端上被替换的提交可能永久丢失，且会影响其他协作者，请确认你了解此操作的后果。",
   "No remote configured for this repository": "该仓库未配置远程仓库，无法推送",
+  // 推送对话框（对应 TortoiseGit Push 的 Destination / Options 区）
+  "Arbitrary URL": "任意 URL",
+  "Force with lease": "安全强制推送（force-with-lease）",
+  "Include Tags": "包含标签",
+  "Set upstream / track remote branch": "设置上游 / 跟踪远端分支",
+  "Overwrite the remote branch even if it has commits missing locally (git push --force)":
+    "即使远端有本地没有的提交也覆盖（git push --force）",
+  "Push only if the remote branch is still at the last fetched state, so others’ new commits are never overwritten (git push --force-with-lease)":
+    "远端分支仍处于上次抓取的状态时才推送，避免覆盖他人的新提交（git push --force-with-lease）",
+  "Push all local tags along with the branches (git push --tags)":
+    "分支推送的同时推送所有本地标签（git push --tags）",
+  "When the local branch has no upstream, track the pushed remote branch (git push -u)":
+    "本地分支没有上游时，建立到所推远端分支的跟踪关系（git push -u）",
   Abort: "中止",
   Progress: "进度",
   "Retrying with new credentials…": "使用新凭证重试…",

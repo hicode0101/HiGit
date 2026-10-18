@@ -807,7 +807,8 @@ impl GitEngine for Git2Backend {
         })
     }
 
-    /// 多分支推送（推送对话框）：refspecs 显式给定，支持 force；
+    /// 多分支推送（推送对话框）：refspecs 显式给定，支持 force、安全强制（--force-with-lease）、
+    /// 推送标签（--tags）、指定目标远端名或任意 URL（匿名远端）；
     /// git 命令回显 / 远端 sideband 输出 / 逐分支推送结果经 `on_event` 上报。
     fn push_multi(
         &self,
@@ -825,8 +826,8 @@ impl GitEngine for Git2Backend {
                 });
             };
 
-            // 组装 refspec（空远端分支 = 同名）；force 等价前缀 "+"
-            let mut refspecs = Vec::with_capacity(req.refspecs.len());
+            // 组装 refspec（空远端分支 = 同名）；force / 安全强制等价前缀 "+"
+            let mut pairs = Vec::with_capacity(req.refspecs.len());
             for (local, remote) in &req.refspecs {
                 let local = local.trim();
                 if local.is_empty() {
@@ -837,17 +838,62 @@ impl GitEngine for Git2Backend {
                 } else {
                     remote.trim()
                 };
-                let prefix = if req.force { "+" } else { "" };
-                refspecs.push(format!("{prefix}refs/heads/{local}:refs/heads/{remote}"));
+                pairs.push((local.to_string(), remote.to_string()));
             }
-            if refspecs.is_empty() {
+            if pairs.is_empty() {
                 return Err(HigitError::new(ErrorCode::Unknown, "no branch to push"));
             }
+            let mut refspecs = Vec::with_capacity(pairs.len());
+            for (local, remote) in &pairs {
+                let prefix = if req.force || req.force_with_lease { "+" } else { "" };
+                refspecs.push(format!("{prefix}refs/heads/{local}:refs/heads/{remote}"));
+            }
 
-            let remote_name = resolve_remote_name(repo, "", None)?;
-            let mut r = repo
-                .find_remote(&remote_name)
-                .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?;
+            // 目标远端：任意 URL（匿名远端）> 显式远端名 > 自动解析；
+            // 标签引用须在创建远端对象前收集（Remote 与引用迭代都作用在 repo 上）
+            let url_mode = !req.remote_url.trim().is_empty();
+            if url_mode && req.force_with_lease {
+                return Err(HigitError::new(
+                    ErrorCode::Unknown,
+                    "安全强制推送需要远端跟踪基准，任意 URL 推送不支持（请改用强制推送）",
+                ));
+            }
+            let mut tag_names: Vec<String> = Vec::new();
+            if req.tags {
+                let glob = repo
+                    .references_glob("refs/tags/*")
+                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                for reference in glob {
+                    let reference =
+                        reference.map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                    if let Ok(name) = reference.name() {
+                        // references_glob 返回全名（refs/tags/v1），refspec 用短名
+                        tag_names.push(name.trim_start_matches("refs/tags/").to_string());
+                    }
+                }
+                for name in &tag_names {
+                    refspecs.push(format!("refs/tags/{name}:refs/tags/{name}"));
+                }
+            }
+
+            let remote_name = if url_mode {
+                String::new()
+            } else if !req.remote.trim().is_empty() {
+                let name = req.remote.trim();
+                repo.find_remote(name).map_err(|_| {
+                    HigitError::new(ErrorCode::Unknown, format!("remote not found: {name}"))
+                })?;
+                name.to_string()
+            } else {
+                resolve_remote_name(repo, "", None)?
+            };
+            let mut r = if url_mode {
+                repo.remote_anonymous(req.remote_url.trim())
+                    .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?
+            } else {
+                repo.find_remote(&remote_name)
+                    .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?
+            };
             let url = r.url().unwrap_or_default().to_string();
             let auth = AuthLog::new(on_event);
 
@@ -856,25 +902,85 @@ impl GitEngine for Git2Backend {
             }
 
             // git 命令回显（TortoiseGit 风格首行）
-            let display = req
-                .refspecs
+            let display = pairs
                 .iter()
-                .map(|(l, rm)| {
-                    let remote = if rm.trim().is_empty() {
-                        l.as_str()
-                    } else {
-                        rm.trim()
-                    };
-                    format!("{}:{}", l.trim(), remote)
-                })
+                .map(|(l, rm)| format!("{l}:{rm}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let force_flag = if req.force { " --force" } else { "" };
+            let mut flags = String::new();
+            if req.force {
+                flags.push_str(" --force");
+            }
+            if req.force_with_lease {
+                flags.push_str(" --force-with-lease");
+            }
+            if req.tags {
+                flags.push_str(" --tags");
+            }
+            let dest = if url_mode {
+                url.clone()
+            } else {
+                remote_name.clone()
+            };
             log(
                 "dim",
-                format!("git push{force_flag} --progress \"{remote_name}\" {display}"),
+                format!("git push{flags} --progress \"{dest}\" {display}"),
             );
             log("dim", format!("远端: {url}"));
+            if req.tags && !tag_names.is_empty() {
+                log(
+                    "info",
+                    format!("同时推送标签 {} 个: {}", tag_names.len(), tag_names.join(" ")),
+                );
+            }
+
+            // 安全强制（--force-with-lease）：推送前校验远端各分支仍与本地跟踪引用一致；
+            // libgit2 推送无内建 lease，预检通过后仍以 force refspec 推送
+            if req.force_with_lease {
+                let mut cbs_lease = git2::RemoteCallbacks::new();
+                apply_credentials(
+                    &mut cbs_lease,
+                    creds.cloned().unwrap_or(Credentials::SshKey {
+                        username: String::new(),
+                        key_path: String::new(),
+                        passphrase: String::new(),
+                        from_store: false,
+                    }),
+                    Some(&auth),
+                );
+                set_hostkey_callback(&mut cbs_lease, &url);
+                {
+                    let conn = r
+                        .connect_auth(git2::Direction::Push, Some(cbs_lease), self.proxy_opts())
+                        .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?;
+                    let mut advertised = std::collections::HashMap::new();
+                    for head in conn
+                        .list()
+                        .map_err(|e| HigitError::new(ErrorCode::NetworkFailed, e.message()))?
+                    {
+                        advertised.insert(head.name().to_string(), head.oid());
+                    }
+                    for (_, remote) in &pairs {
+                        let remote_ref = format!("refs/heads/{remote}");
+                        let Some(&actual) = advertised.get(&remote_ref) else {
+                            continue; // 远端不存在该分支：新建推送，无需校验
+                        };
+                        let expected = repo
+                            .find_reference(&format!("refs/remotes/{remote_name}/{remote}"))
+                            .ok()
+                            .and_then(|x| x.target());
+                        if expected != Some(actual) {
+                            return Err(HigitError::new(
+                                ErrorCode::PushRejected,
+                                format!(
+                                    "安全强制推送被拒：远端分支 '{remote}' 与本地跟踪引用不一致（远端可能已被他人更新）。请先抓取，或改用强制推送。"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                log("info", "安全强制校验通过：远端与本地跟踪引用一致".to_string());
+            }
 
             let mut cbs = git2::RemoteCallbacks::new();
             // 远端 sideband 输出（remote: ...）按行缓冲上报；返回 false 以支持中止
@@ -916,12 +1022,16 @@ impl GitEngine for Git2Backend {
             });
             cbs.push_update_reference(move |refname, status| match status {
                 None => {
-                    let short = refname.trim_start_matches("refs/heads/");
+                    let short = refname
+                        .trim_start_matches("refs/heads/")
+                        .trim_start_matches("refs/tags/");
                     log("ok", format!("{short} -> {short}  ✓"));
                     Ok(())
                 }
                 Some(msg) => {
-                    let short = refname.trim_start_matches("refs/heads/");
+                    let short = refname
+                        .trim_start_matches("refs/heads/")
+                        .trim_start_matches("refs/tags/");
                     log("error", format!("{short} -> {short}  ✗ {msg}"));
                     Ok(())
                 }
@@ -948,25 +1058,22 @@ impl GitEngine for Git2Backend {
                 .map_err(|e| map_net_err(e, &url, cancel.is_cancelled(), creds.is_some()))?;
             auth.succeed();
 
-            // 逐分支建立缺失的上游（等价 -u；推送多分支时目标为各自的远端分支名）
+            // 逐分支建立缺失的上游（等价 -u；推送多分支时目标为各自的远端分支名）；
+            // 任意 URL 推送没有可引用的远端名，无法建立跟踪
             let mut created_upstream = false;
-            for (local, remote) in &req.refspecs {
-                let local = local.trim();
-                let remote = if remote.trim().is_empty() {
-                    local
-                } else {
-                    remote.trim()
-                };
-                if let Ok(mut b) = repo.find_branch(local, BranchType::Local) {
-                    if b.upstream().is_err()
-                        && b.set_upstream(Some(&format!("{remote_name}/{remote}")))
-                            .is_ok()
-                    {
-                        created_upstream = true;
-                        log(
-                            "info",
-                            format!("branch '{local}' set up to track '{remote_name}/{remote}'"),
-                        );
+            if req.set_upstream && !url_mode {
+                for (local, remote) in &pairs {
+                    if let Ok(mut b) = repo.find_branch(local, BranchType::Local) {
+                        if b.upstream().is_err()
+                            && b.set_upstream(Some(&format!("{remote_name}/{remote}")))
+                                .is_ok()
+                        {
+                            created_upstream = true;
+                            log(
+                                "info",
+                                format!("branch '{local}' set up to track '{remote_name}/{remote}'"),
+                            );
+                        }
                     }
                 }
             }
@@ -985,6 +1092,26 @@ impl GitEngine for Git2Backend {
                 .and_then(|r| r.url().ok().map(str::to_string))
                 .unwrap_or_default();
             Ok(Some((name, url)))
+        })
+    }
+
+    fn remotes(&self, session: &RepoSession) -> Result<Vec<(String, String)>> {
+        self.with_session(session, |_s, repo| {
+            let names = repo
+                .remotes()
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            let mut out = Vec::with_capacity(names.len());
+            for i in 0..names.len() {
+                if let Ok(Some(name)) = names.get(i) {
+                    let url = repo
+                        .find_remote(name)
+                        .ok()
+                        .and_then(|r| r.url().ok().map(str::to_string))
+                        .unwrap_or_default();
+                    out.push((name.to_string(), url));
+                }
+            }
+            Ok(out)
         })
     }
 

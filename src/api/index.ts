@@ -120,6 +120,16 @@ export const api = {
     refspecs?: { local: string; remote: string }[];
     branch?: string;
     force?: boolean;
+    /** push：目标远端名（空 = 自动解析） */
+    pushRemote?: string;
+    /** push：任意 URL 推送（优先于 pushRemote） */
+    pushUrl?: string;
+    /** push：安全强制（--force-with-lease，与 force 互斥） */
+    forceWithLease?: boolean;
+    /** push：同时推送所有本地标签（--tags） */
+    pushTags?: boolean;
+    /** push：无上游时建立跟踪（缺省 true 保持既有行为） */
+    setUpstream?: boolean;
     pullOpts?: PullOptsDto | null;
     creds: CredsDto | null;
     remember: boolean;

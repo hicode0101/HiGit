@@ -2346,3 +2346,251 @@ fn pull_options_all_tags_fetches_unreachable_tags() {
     let repo = git2::Repository::open(&a.0).unwrap();
     assert!(repo.find_reference("refs/tags/v9").is_ok());
 }
+
+// ---------- 增强推送（FR-5.2 扩展：目标远端 / 任意 URL / force-with-lease / --tags / -u） ----------
+
+use higit_git::engine::PushRequest;
+
+/// 在仓库当前 HEAD 上打一个轻量标签
+fn make_tag(repo_path: &Path, name: &str) {
+    let repo = git2::Repository::open(repo_path).unwrap();
+    let oid = repo.head().unwrap().target().unwrap();
+    repo.reference(&format!("refs/tags/{name}"), oid, false, name)
+        .unwrap();
+}
+
+#[test]
+fn push_multi_tags_pushes_all_local_tags() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    // main 打 v1，topic 分支打 v2，随分支一起推送
+    write(&a.0.join("f1.txt"), "1\n");
+    backend.stage(&sa, &[a.0.join("f1.txt")]).unwrap();
+    backend.commit(&sa, "c1", None).unwrap();
+    make_tag(&a.0, "v1");
+    backend.create_branch(&sa, "topic", None).unwrap();
+    backend.checkout_branch(&sa, "topic").unwrap();
+    write(&a.0.join("f2.txt"), "2\n");
+    backend.stage(&sa, &[a.0.join("f2.txt")]).unwrap();
+    backend.commit(&sa, "c2", None).unwrap();
+    make_tag(&a.0, "v2");
+
+    let req = PushRequest {
+        refspecs: vec![("main".into(), String::new()), ("topic".into(), String::new())],
+        tags: true,
+        ..Default::default()
+    };
+    backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap();
+    let bare = git2::Repository::open_bare(&remote.0).unwrap();
+    assert!(bare.find_reference("refs/tags/v1").is_ok());
+    assert!(bare.find_reference("refs/tags/v2").is_ok());
+    assert!(bare.find_reference("refs/heads/topic").is_ok());
+}
+
+#[test]
+fn push_multi_force_with_lease_blocks_when_remote_moved() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    // b 推进远端 main；a 未抓取，跟踪引用仍停留在旧提交
+    push_from_b(backend.as_ref(), &sb, &b.0, "feature.txt");
+
+    // 安全强制：远端与跟踪引用不一致，必须拒绝（避免覆盖 b 的新提交）
+    let req = PushRequest {
+        refspecs: vec![("main".into(), String::new())],
+        force_with_lease: true,
+        ..Default::default()
+    };
+    let err = backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap_err();
+    assert_eq!(err.code, higit_git::error::ErrorCode::PushRejected);
+    // 远端未被改动
+    let bare = git2::Repository::open_bare(&remote.0).unwrap();
+    let b_repo = git2::Repository::open(&b.0).unwrap();
+    assert_eq!(
+        bare.find_reference("refs/heads/main").unwrap().target(),
+        b_repo.head().unwrap().target()
+    );
+}
+
+#[test]
+fn push_multi_force_with_lease_allows_when_tracking_current() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let b = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+    let sb = clone_from(backend.as_ref(), &remote.0, &b.0);
+
+    // b 推进远端 main；a 抓取后跟踪引用与远端一致
+    push_from_b(backend.as_ref(), &sb, &b.0, "feature.txt");
+    backend.fetch(&sa, "", None, &|_| {}, &token).unwrap();
+
+    // 安全强制回退远端 main：lease 校验通过，强推成功
+    let req = PushRequest {
+        refspecs: vec![("main".into(), String::new())],
+        force_with_lease: true,
+        ..Default::default()
+    };
+    backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap();
+    let bare = git2::Repository::open_bare(&remote.0).unwrap();
+    let a_repo = git2::Repository::open(&a.0).unwrap();
+    assert_eq!(
+        bare.find_reference("refs/heads/main").unwrap().target(),
+        a_repo.head().unwrap().target()
+    );
+}
+
+#[test]
+fn push_multi_set_upstream_flag_controls_tracking() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    backend.create_branch(&sa, "nb", None).unwrap();
+
+    // 关闭建立跟踪：推送成功但不设置上游
+    let req = PushRequest {
+        refspecs: vec![("nb".into(), String::new())],
+        set_upstream: false,
+        ..Default::default()
+    };
+    backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap();
+    let repo = git2::Repository::open(&a.0).unwrap();
+    assert!(repo
+        .find_branch("nb", git2::BranchType::Local)
+        .unwrap()
+        .upstream()
+        .is_err());
+    drop(repo);
+
+    // 默认（开启）：再次推送后建立到 origin/nb 的跟踪
+    let req = PushRequest {
+        refspecs: vec![("nb".into(), String::new())],
+        ..Default::default()
+    };
+    let o = backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap();
+    assert!(o.created_upstream);
+    let repo = git2::Repository::open(&a.0).unwrap();
+    let up = repo
+        .find_branch("nb", git2::BranchType::Local)
+        .unwrap()
+        .upstream()
+        .unwrap();
+    assert_eq!(up.name().unwrap(), Some("origin/nb"));
+}
+
+#[test]
+fn push_multi_to_named_remote_only_touches_that_remote() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let mirror = temp_repo();
+    make_bare_remote(&mirror.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    // 追加第二个远端 mirror；本地提交 c1（未推送）
+    {
+        let repo = git2::Repository::open(&a.0).unwrap();
+        repo.remote("mirror", mirror.0.to_str().unwrap()).unwrap();
+    }
+    write(&a.0.join("f1.txt"), "1\n");
+    backend.stage(&sa, &[a.0.join("f1.txt")]).unwrap();
+    backend.commit(&sa, "c1", None).unwrap();
+
+    // 指定远端名推送：只有 mirror 更新，origin 保持 seed
+    let req = PushRequest {
+        refspecs: vec![("main".into(), String::new())],
+        remote: "mirror".into(),
+        ..Default::default()
+    };
+    backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap();
+    let origin = git2::Repository::open_bare(&remote.0).unwrap();
+    let mirror_repo = git2::Repository::open_bare(&mirror.0).unwrap();
+    let a_repo = git2::Repository::open(&a.0).unwrap();
+    assert_eq!(
+        mirror_repo.find_reference("refs/heads/main").unwrap().target(),
+        a_repo.head().unwrap().target()
+    );
+    assert_ne!(
+        origin.find_reference("refs/heads/main").unwrap().target(),
+        a_repo.head().unwrap().target()
+    );
+    // remotes() 列出全部远端
+    let list = backend.remotes(&sa).unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().any(|(n, _)| n == "origin"));
+    assert!(list.iter().any(|(n, _)| n == "mirror"));
+}
+
+#[test]
+fn push_multi_to_arbitrary_url_pushes_to_anonymous_remote() {
+    let remote = temp_repo();
+    make_bare_remote(&remote.0);
+    let dest = temp_repo();
+    make_bare_remote(&dest.0);
+    let a = temp_repo();
+    let backend = create_backend(BackendKind::Git2).unwrap();
+    let token = higit_git::engine::CancelToken::default();
+    let sa = clone_from(backend.as_ref(), &remote.0, &a.0);
+
+    write(&a.0.join("f1.txt"), "1\n");
+    backend.stage(&sa, &[a.0.join("f1.txt")]).unwrap();
+    backend.commit(&sa, "c1", None).unwrap();
+    backend.create_branch(&sa, "nb", None).unwrap();
+
+    // 任意 URL 推送：推到独立的裸仓库，origin 不受影响
+    let req = PushRequest {
+        refspecs: vec![("nb".into(), String::new())],
+        remote_url: dest.0.to_str().unwrap().to_string(),
+        ..Default::default()
+    };
+    backend
+        .push_multi(&sa, &req, None, &silent_event, &token)
+        .unwrap();
+    let dest_repo = git2::Repository::open_bare(&dest.0).unwrap();
+    let a_repo = git2::Repository::open(&a.0).unwrap();
+    assert_eq!(
+        dest_repo.find_reference("refs/heads/nb").unwrap().target(),
+        a_repo
+            .find_branch("nb", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .target()
+    );
+    // URL 推送无可引用的远端名，即使请求 set_upstream 也不建立跟踪
+    assert!(a_repo
+        .find_branch("nb", git2::BranchType::Local)
+        .unwrap()
+        .upstream()
+        .is_err());
+}

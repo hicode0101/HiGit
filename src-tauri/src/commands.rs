@@ -1551,8 +1551,18 @@ pub struct SyncPreviewDto {
     pub path: String,
     pub remote_name: String,
     pub url: String,
+    /// 配置的所有远端（推送对话框的目标远端选择）
+    pub remotes: Vec<SyncRemoteDto>,
     pub branches: Vec<SyncBranchDto>,
     pub remote_branches: Vec<String>,
+}
+
+/// 同步对话框的远端选项（名称 + URL）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRemoteDto {
+    pub name: String,
+    pub url: String,
 }
 
 #[tauri::command]
@@ -1592,6 +1602,12 @@ pub async fn sync_preview(app: AppHandle) -> CmdResult<SyncPreviewDto> {
                 .filter(|b| b.is_remote && b.name.starts_with(&remote_prefix))
                 .map(|b| b.name[remote_prefix.len()..].to_string())
                 .collect();
+            let remotes = state
+                .engine
+                .remotes(&h.session)?
+                .into_iter()
+                .map(|(name, url)| SyncRemoteDto { name, url })
+                .collect();
             Ok(SyncPreviewDto {
                 name: h
                     .path
@@ -1601,6 +1617,7 @@ pub async fn sync_preview(app: AppHandle) -> CmdResult<SyncPreviewDto> {
                 path: abs_string(&h.path),
                 remote_name,
                 url,
+                remotes,
                 branches,
                 remote_branches,
             })
@@ -1641,6 +1658,21 @@ pub struct SyncStartReq {
     /// push：强制推送
     #[serde(default)]
     pub force: bool,
+    /// push：目标远端名（空 = 自动解析）
+    #[serde(default)]
+    pub push_remote: String,
+    /// push：任意 URL 推送（优先于 push_remote）
+    #[serde(default)]
+    pub push_url: String,
+    /// push：安全强制（--force-with-lease，与 force 互斥）
+    #[serde(default)]
+    pub force_with_lease: bool,
+    /// push：同时推送所有本地标签（--tags）
+    #[serde(default)]
+    pub push_tags: bool,
+    /// push：无上游时建立跟踪（缺省 true 保持既有行为）
+    #[serde(default = "default_true")]
+    pub set_upstream: bool,
     #[serde(default)]
     pub creds: Option<CredsDto>,
     #[serde(default)]
@@ -1648,6 +1680,10 @@ pub struct SyncStartReq {
     /// pull：TortoiseGit 式拉取选项（缺省 = 快进优先、分叉报错、不 prune）
     #[serde(default)]
     pub pull_opts: Option<PullOptsDto>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 拉取选项（FR-5.1 扩展，拉取对话框提交）
@@ -2080,6 +2116,11 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                     let preq = PushRequest {
                         refspecs: refspecs.clone(),
                         force,
+                        remote: req.push_remote.clone(),
+                        remote_url: req.push_url.clone(),
+                        force_with_lease: req.force_with_lease,
+                        tags: req.push_tags,
+                        set_upstream: req.set_upstream,
                     };
                     state
                         .engine
