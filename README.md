@@ -100,7 +100,7 @@
 pnpm install            # 安装前端依赖
 pnpm tauri dev          # 开发运行（vite dev server + tauri）
 pnpm tauri build        # 发布构建（Windows 产出 NSIS 安装包等）
-pnpm tauri build --no-bundle  # 只编译主程序不打包安装包（产物 target/release/higit.exe）
+pnpm tauri build --no-bundle  # 只编译主程序不打包安装包（产物 target/release/HiGit.exe）
 cargo test --workspace  # 全量测试（49 项，见下）
 ```
 

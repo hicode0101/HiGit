@@ -101,7 +101,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          $exe = 'target/release/higit.exe'
+          $exe = 'target/release/HiGit.exe'
           Test-Path $exe || throw "未找到主程序 $exe —— 构建产物路径变化了吗？"
           $zip = "HiGit_${version}_x64_portable.zip"
           Compress-Archive -Path $exe -DestinationPath $zip -Force
