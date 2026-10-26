@@ -4,8 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -726,6 +726,41 @@ pub async fn refresh_status(app: AppHandle) -> CmdResult<StatusDto> {
     .await
 }
 
+/// list_dir 行状态判定（FR-2.2/2.4）：
+/// - 条目命中自身 → 直接采用；
+/// - 未命中 → 沿祖先查折叠目录条目：status 对整目录未跟踪/忽略只报一条 "dir/"，
+///   目录内部条目继承该状态，否则进入目录后全部误显示"未修改"；
+/// - 目录 → 任一非忽略后代变更 → Modified（目录聚合）；
+/// - 其余 → Clean。忽略状态透传给前端（有"忽略"样式），show_ignored=false 由调用方过滤。
+fn row_status_kind(
+    map: &HashMap<String, FileStatusKind>,
+    dir_changed: &HashSet<String>,
+    rel_path: &str,
+    is_dir: bool,
+) -> FileStatusKind {
+    let kind = map.get(rel_path).copied().or_else(|| {
+        let mut acc = String::new();
+        let mut inherited = None;
+        for seg in rel_path.split('/') {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(seg);
+            if let Some(k) = map.get(&acc) {
+                if matches!(k, FileStatusKind::Untracked | FileStatusKind::Ignored) {
+                    inherited = Some(*k);
+                }
+            }
+        }
+        inherited
+    });
+    match kind {
+        Some(k) if k != FileStatusKind::Clean => k,
+        _ if is_dir && dir_changed.contains(rel_path) => FileStatusKind::Modified,
+        _ => FileStatusKind::Clean,
+    }
+}
+
 /// 文件列表：文件系统目录 + Git 状态聚合（目录聚合后代变更，FR-2.2/2.4）。
 /// show_ignored 由前端显式传入：保存配置与刷新列表是并发调用，读后端配置会慢一拍产生竞态。
 #[tauri::command]
@@ -782,15 +817,10 @@ pub async fn list_dir(
                 } else {
                     format!("{rel}/{name}")
                 };
-                let kind = map.get(&rel_path).copied();
-                if !show_ignored && kind == Some(FileStatusKind::Ignored) {
+                let effective = row_status_kind(&map, &dir_changed, &rel_path, is_dir);
+                if !show_ignored && effective == FileStatusKind::Ignored {
                     continue;
                 }
-                let effective = match kind {
-                    Some(k) if !matches!(k, FileStatusKind::Clean | FileStatusKind::Ignored) => k,
-                    _ if is_dir && dir_changed.contains(&rel_path) => FileStatusKind::Modified,
-                    _ => FileStatusKind::Clean,
-                };
                 let mtime_unix = entry
                     .metadata()
                     .and_then(|m| m.modified())
@@ -3057,5 +3087,105 @@ mod net_note_tests {
         assert!(socks_proxy_hint(None, true).is_none());
         let zh = socks_proxy_hint(Some("socks5://127.0.0.1:10808"), true).unwrap();
         assert!(zh.contains("HTTP"), "{zh}");
+    }
+}
+
+#[cfg(test)]
+mod row_status_kind_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::row_status_kind;
+    use higit_git::model::FileStatusKind;
+
+    fn status_map(pairs: &[(&str, FileStatusKind)]) -> HashMap<String, FileStatusKind> {
+        pairs.iter().map(|(p, k)| (p.to_string(), *k)).collect()
+    }
+
+    #[test]
+    fn file_inside_folded_untracked_dir_is_untracked() {
+        // status 对整目录未跟踪只报一条 "gfe-analysis"，内部文件必须继承"新增"
+        let map = status_map(&[("gfe-analysis", FileStatusKind::Untracked)]);
+        let dir_changed = HashSet::new();
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "gfe-analysis/file-management.js", false),
+            FileStatusKind::Untracked
+        );
+        // 深层同理
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "gfe-analysis/a/b/c.js", false),
+            FileStatusKind::Untracked
+        );
+    }
+
+    #[test]
+    fn subdir_inside_folded_untracked_dir_is_untracked() {
+        let map = status_map(&[("gfe-analysis", FileStatusKind::Untracked)]);
+        let dir_changed = HashSet::new();
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "gfe-analysis/sub", true),
+            FileStatusKind::Untracked
+        );
+    }
+
+    #[test]
+    fn file_inside_folded_ignored_dir_is_ignored() {
+        let map = status_map(&[("vendor", FileStatusKind::Ignored)]);
+        let dir_changed = HashSet::new();
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "vendor/lib.js", false),
+            FileStatusKind::Ignored
+        );
+    }
+
+    #[test]
+    fn direct_hit_and_dir_aggregation_unchanged() {
+        let map = status_map(&[
+            ("src/main.rs", FileStatusKind::Modified),
+            ("new.txt", FileStatusKind::Untracked),
+        ]);
+        let mut dir_changed = HashSet::new();
+        dir_changed.insert("src".to_string());
+        // 命中自身条目
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "src/main.rs", false),
+            FileStatusKind::Modified
+        );
+        // 目录聚合：后代有变更 → 已修改
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "src", true),
+            FileStatusKind::Modified
+        );
+        // 无任何关联 → 未修改
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "other.txt", false),
+            FileStatusKind::Clean
+        );
+        // 自身未跟踪
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "new.txt", false),
+            FileStatusKind::Untracked
+        );
+    }
+
+    #[test]
+    fn non_inheritable_ancestor_does_not_leak() {
+        // 子模块等目录条目为 Modified：内部文件不继承，保持未修改
+        let map = status_map(&[("sub", FileStatusKind::Modified)]);
+        let dir_changed = HashSet::new();
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "sub/x.txt", false),
+            FileStatusKind::Clean
+        );
+    }
+
+    #[test]
+    fn ignored_passes_through_for_display() {
+        // show_ignored=true 时忽略条目应显示"忽略"而不是"未修改"
+        let map = status_map(&[("build.log", FileStatusKind::Ignored)]);
+        let dir_changed = HashSet::new();
+        assert_eq!(
+            row_status_kind(&map, &dir_changed, "build.log", false),
+            FileStatusKind::Ignored
+        );
     }
 }
