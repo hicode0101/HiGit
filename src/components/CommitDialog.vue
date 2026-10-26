@@ -9,6 +9,7 @@ import { api } from "../api";
 import type { CommitPreviewDto, StagedFileDto } from "../api/types";
 import { doCommit, openSyncDialog } from "../tasks";
 import { t, formatDateTime, formatSize } from "../i18n";
+import { useColResize } from "../colresize";
 import DialogBase from "./DialogBase.vue";
 import IconGlyph from "./IconGlyph.vue";
 
@@ -29,6 +30,57 @@ const newBranchName = ref("");
 const showUnversioned = ref(true);
 
 const files = computed(() => preview.value?.files ?? []);
+
+// ---- 列头排序：点击路径/状态/修改时间列头切换升序、降序；首次点击某列 = 降序（与工作区文件列表一致）----
+type SortKey = "path" | "status" | "mtime";
+// 后端枚举默认按路径升序，与初始排序态一致
+const sortKey = ref<SortKey>("path");
+const sortDir = ref<1 | -1>(1);
+
+function setSort(key: SortKey) {
+  if (sortKey.value === key) {
+    sortDir.value = sortDir.value === 1 ? -1 : 1;
+  } else {
+    sortKey.value = key;
+    sortDir.value = -1; // 首次点击该列 = 降序
+  }
+}
+
+function byPath(a: StagedFileDto, b: StagedFileDto): number {
+  return a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" });
+}
+
+const sortedFiles = computed(() => {
+  const list = [...visibleFiles.value];
+  const key = sortKey.value;
+  const dir = sortDir.value;
+  list.sort((a, b) => {
+    switch (key) {
+      case "path":
+        return byPath(a, b) * dir;
+      case "status":
+        return (statusLabel(a.kind).localeCompare(statusLabel(b.kind)) || byPath(a, b)) * dir;
+      case "mtime":
+        return ((a.mtimeUnix ?? 0) - (b.mtimeUnix ?? 0) || byPath(a, b)) * dir;
+    }
+  });
+  return list;
+});
+
+// ---- 列宽拖拽（与工作区文件列表同一套交互，逻辑共用 src/colresize.ts；双击分界线复位）----
+const listEl = ref<HTMLElement | null>(null);
+const { colVars, startResize, resetWidths } = useColResize(
+  {
+    id: "commit-dialog",
+    cols: ["status", "add", "del", "size", "mtime"],
+    defaults: { status: 100, add: 64, del: 64, size: 80, mtime: 140 },
+    mins: { status: 90, add: 44, del: 44, size: 56, mtime: 110 },
+    elasticMin: 140,
+    padTotal: 60, // 表头/行左右 padding 12+12 + 勾选框列 36
+  },
+  listEl,
+);
+
 /** 未版本控制文件可整体隐藏 */
 const visibleFiles = computed(() =>
   files.value.filter((f) => showUnversioned.value || f.kind !== "added"),
@@ -307,7 +359,7 @@ function statusClass(kind: string): string {
       </button>
     </div>
 
-    <div class="file-list">
+    <div ref="listEl" class="file-list" :style="colVars">
       <div class="list-head">
         <div class="col-check">
           <input
@@ -317,19 +369,39 @@ function statusClass(kind: string): string {
             @change="toggleAll(($event.target as HTMLInputElement).checked)"
           />
         </div>
-        <div class="col-path">{{ t("Path") }}</div>
-        <div class="col-status">{{ t("Status") }}</div>
-        <div class="col-add">{{ t("Lines Added") }}</div>
-        <div class="col-del">{{ t("Lines Removed") }}</div>
-        <div class="col-size">{{ t("Size") }}</div>
-        <div class="col-mtime">{{ t("Last Modified") }}</div>
+        <div class="col-path th-sort" :class="{ on: sortKey === 'path' }" :title="t('Click to sort')" @click="setSort('path')">
+          <span>{{ t("Path") }}</span>
+          <IconGlyph v-if="sortKey === 'path'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+          <span class="col-rz" @mousedown="startResize(null, 'status', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        </div>
+        <div class="col-status th-sort" :class="{ on: sortKey === 'status' }" :title="t('Click to sort')" @click="setSort('status')">
+          <span>{{ t("Status") }}</span>
+          <IconGlyph v-if="sortKey === 'status'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+          <span class="col-rz" @mousedown="startResize('status', 'add', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        </div>
+        <div class="col-add">
+          {{ t("Lines Added") }}
+          <span class="col-rz" @mousedown="startResize('add', 'del', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        </div>
+        <div class="col-del">
+          {{ t("Lines Removed") }}
+          <span class="col-rz" @mousedown="startResize('del', 'size', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        </div>
+        <div class="col-size">
+          {{ t("Size") }}
+          <span class="col-rz" @mousedown="startResize('size', 'mtime', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        </div>
+        <div class="col-mtime th-sort" :class="{ on: sortKey === 'mtime' }" :title="t('Click to sort')" @click="setSort('mtime')">
+          <span>{{ t("Last Modified") }}</span>
+          <IconGlyph v-if="sortKey === 'mtime'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
+        </div>
       </div>
       <div class="list-body">
         <div v-if="loading" class="list-loading">
           <div class="load-bar"></div>
           <span class="load-text">{{ t("Loading changed files…") }}</span>
         </div>
-        <div v-for="f in visibleFiles" :key="f.path" class="file-row" @click="openDiff(f)">
+        <div v-for="f in sortedFiles" :key="f.path" class="file-row" @click="openDiff(f)">
           <div class="col-check" @click.stop>
             <input
               type="checkbox"
@@ -513,12 +585,79 @@ function statusClass(kind: string): string {
 
 .list-head {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   padding: 7px 12px;
   border-bottom: 1px solid var(--divider);
   font-size: 12px;
   color: var(--text-tertiary);
   flex: none;
+}
+
+.list-head > div {
+  position: relative;
+}
+
+/* 列分隔线只显示在表头（与工作区文件列表一致，比行分隔线 --divider 深一档） */
+.list-head .col-status,
+.list-head .col-add,
+.list-head .col-del,
+.list-head .col-size,
+.list-head .col-mtime {
+  border-left: 1px solid var(--border-color);
+}
+
+/* 表头路径单元格纵向居中（数据行 .col-path 需保持块级以支持省略号，不能加 flex） */
+.list-head .col-path {
+  display: flex;
+  align-items: center;
+}
+
+/* 列宽拖拽把手：骑在分界线上，透明、悬停显色；负向 top/bottom 补满表头上下 padding 的抓取区 */
+.col-rz {
+  position: absolute;
+  top: -7px;
+  bottom: -7px;
+  right: -6px;
+  width: 11px;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.col-rz::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 1px;
+  background: transparent;
+}
+
+.col-rz:hover::after {
+  background: var(--accent);
+}
+
+/* 列头可点击排序：悬停变色、激活列主题色 + 方向箭头（升序箭头翻转向上） */
+.th-sort {
+  cursor: pointer;
+  user-select: none;
+}
+
+.th-sort:hover {
+  color: var(--text-secondary);
+}
+
+.th-sort.on {
+  color: var(--accent);
+}
+
+.sort-arrow {
+  flex: none;
+  transition: transform 0.15s;
+}
+
+.sort-arrow.asc {
+  transform: rotate(180deg);
 }
 
 .list-body {
@@ -553,17 +692,35 @@ function statusClass(kind: string): string {
   flex: 1;
   min-width: 0;
   font-size: 13px;
+  padding-right: 12px;
 }
 
 .col-status {
-  width: 100px;
+  width: var(--col-status, 100px);
   flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.col-add {
+  width: var(--col-add, 64px);
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.col-del {
+  width: var(--col-del, 64px);
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
 }
 
 .col-add,
 .col-del {
-  width: 64px;
-  flex: none;
   font-size: 12px;
 }
 
@@ -581,15 +738,21 @@ function statusClass(kind: string): string {
 }
 
 .col-size {
-  width: 80px;
+  width: var(--col-size, 80px);
   flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
   color: var(--text-secondary);
   font-size: 12px;
 }
 
 .col-mtime {
-  width: 140px;
+  width: var(--col-mtime, 140px);
   flex: none;
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
   color: var(--text-tertiary);
   font-size: 12px;
 }

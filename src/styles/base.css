@@ -200,3 +200,10 @@ input[type="radio"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 拖动列宽期间（useColResize）：全局锁定 col-resize 光标 */
+body.col-resizing,
+body.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}

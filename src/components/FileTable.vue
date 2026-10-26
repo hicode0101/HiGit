@@ -1,12 +1,3 @@
-<script lang="ts">
-// 列宽拖拽状态放模块级：FileTable 随"变更/历史"标签切换会卸载重建，模块级状态才能在切换后保留
-type ResizeKey = "status" | "size" | "mtime";
-const COL_DEFAULT: Record<ResizeKey, number> = { status: 140, size: 90, mtime: 170 };
-const COL_MIN: Record<ResizeKey, number> = { status: 80, size: 56, mtime: 110 };
-const NAME_MIN = 140; // 拖动时给名称列保底的最小宽度
-const colWidths = ref<Record<ResizeKey, number>>({ ...COL_DEFAULT });
-</script>
-
 <script setup lang="ts">
 /** 文件列表（图1）：名称(类型图标) / Git 状态 / 大小 / 修改时间，表头可点击排序 + 行内右键菜单（拉取/推送/提交/对比/撤销/分支操作） */
 import { computed, ref, watch } from "vue";
@@ -14,6 +5,7 @@ import { store, navigate } from "../store";
 import { t, formatDateTime, formatSize } from "../i18n";
 import { showContextMenu } from "../ctxmenu";
 import { rowMenu } from "../workmenu";
+import { useColResize } from "../colresize";
 import type { FileRowDto } from "../api/types";
 import IconGlyph from "./IconGlyph.vue";
 
@@ -115,43 +107,19 @@ function onBlankContextmenu() {
   selectedRel.value = null;
 }
 
-// ---- 列宽拖拽：名称列自适应吸收剩余宽度；状态/大小/修改时间三列固定宽，拖表头分界线调整，双击分界线复位 ----
+// ---- 列宽拖拽：拖表头分界线调整列宽（逻辑共用 src/colresize.ts）；双击分界线复位 ----
 const tableEl = ref<HTMLElement | null>(null);
-
-// 列宽经 CSS 变量下发，表头与数据行共用同一套列类名，天然对齐
-const colVars = computed(() => ({
-  "--col-status": `${colWidths.value.status}px`,
-  "--col-size": `${colWidths.value.size}px`,
-  "--col-mtime": `${colWidths.value.mtime}px`,
-}));
-
-function startResize(key: ResizeKey, e: MouseEvent) {
-  e.preventDefault();
-  const startX = e.clientX;
-  const startW = colWidths.value[key];
-  const others = (Object.keys(COL_DEFAULT) as ResizeKey[])
-    .filter((k) => k !== key)
-    .reduce((s, k) => s + colWidths.value[k], 0);
-  // 28 = 表头/行左右 padding 合计；名称列保底后即为该列上限
-  const maxW = tableEl.value
-    ? Math.max(COL_MIN[key], tableEl.value.clientWidth - 28 - NAME_MIN - others)
-    : startW;
-  const onMove = (ev: MouseEvent) => {
-    colWidths.value[key] = Math.min(maxW, Math.max(COL_MIN[key], startW + ev.clientX - startX));
-  };
-  const onUp = () => {
-    document.body.classList.remove("col-resizing");
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
-  };
-  document.body.classList.add("col-resizing");
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
-}
-
-function resetWidths() {
-  colWidths.value = { ...COL_DEFAULT };
-}
+const { colVars, startResize, resetWidths } = useColResize(
+  {
+    id: "work-file-table",
+    cols: ["status", "size", "mtime"],
+    defaults: { status: 140, size: 90, mtime: 170 },
+    mins: { status: 80, size: 56, mtime: 110 },
+    elasticMin: 140,
+    padTotal: 28, // 表头/行左右 padding 合计
+  },
+  tableEl,
+);
 
 function fileIcon(row: FileRowDto): string {
   if (row.isDir) return "folder";
@@ -170,17 +138,17 @@ function fileIcon(row: FileRowDto): string {
       <div class="col-name th-sort" :class="{ on: sortKey === 'name' }" :title="t('Click to sort')" @click="setSort('name')">
         <span>{{ t("Name") }}</span>
         <IconGlyph v-if="sortKey === 'name'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
-        <span class="col-rz" @mousedown="startResize('status', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        <span class="col-rz" @mousedown="startResize(null, 'status', $event)" @click.stop @dblclick.stop="resetWidths"></span>
       </div>
       <div class="col-status th-sort" :class="{ on: sortKey === 'status' }" :title="t('Click to sort')" @click="setSort('status')">
         <span>{{ t("Status") }}</span>
         <IconGlyph v-if="sortKey === 'status'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
-        <span class="col-rz" @mousedown="startResize('size', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        <span class="col-rz" @mousedown="startResize('status', 'size', $event)" @click.stop @dblclick.stop="resetWidths"></span>
       </div>
       <div class="col-size th-sort" :class="{ on: sortKey === 'size' }" :title="t('Click to sort')" @click="setSort('size')">
         <span>{{ t("Size") }}</span>
         <IconGlyph v-if="sortKey === 'size'" name="chevronDown" :size="11" class="sort-arrow" :class="{ asc: sortDir === 1 }" />
-        <span class="col-rz" @mousedown="startResize('mtime', $event)" @click.stop @dblclick.stop="resetWidths"></span>
+        <span class="col-rz" @mousedown="startResize('size', 'mtime', $event)" @click.stop @dblclick.stop="resetWidths"></span>
       </div>
       <div class="col-mtime th-sort" :class="{ on: sortKey === 'mtime' }" :title="t('Click to sort')" @click="setSort('mtime')">
         <span>{{ t("Last Modified") }}</span>
@@ -244,7 +212,7 @@ function fileIcon(row: FileRowDto): string {
 
 .table-row {
   display: flex;
-  align-items: stretch;
+  align-items: center;
   padding: 7px 14px;
   border-bottom: 1px solid var(--divider);
   cursor: default;
@@ -286,14 +254,19 @@ function fileIcon(row: FileRowDto): string {
   color: var(--status-modified);
 }
 
-/* 列分隔线比行分隔线（--divider）深一档；单元格内边距让内容与分隔线保持间距 */
+/* 列分隔线只显示在表头（比行分隔线 --divider 深一档）；数据行不加竖线 */
+.table-head .col-status,
+.table-head .col-size,
+.table-head .col-mtime {
+  border-left: 1px solid var(--border-color);
+}
+
 .col-status {
   width: var(--col-status, 140px);
   flex: none;
   display: flex;
   align-items: center;
   padding: 0 12px;
-  border-left: 1px solid var(--border-color);
 }
 
 .col-size {
@@ -302,7 +275,6 @@ function fileIcon(row: FileRowDto): string {
   display: flex;
   align-items: center;
   padding: 0 12px;
-  border-left: 1px solid var(--border-color);
   color: var(--text-secondary);
   font-size: 12px;
 }
@@ -313,7 +285,6 @@ function fileIcon(row: FileRowDto): string {
   display: flex;
   align-items: center;
   padding-left: 12px;
-  border-left: 1px solid var(--border-color);
   color: var(--text-tertiary);
   font-size: 12px;
 }
@@ -409,14 +380,5 @@ function fileIcon(row: FileRowDto): string {
   text-align: center;
   color: var(--text-tertiary);
   padding: 40px 0;
-}
-</style>
-
-<style>
-/* 拖动列宽期间：全局锁定光标并禁止选中文本（scoped 作用不到 body，单独放开） */
-body.col-resizing,
-body.col-resizing * {
-  cursor: col-resize !important;
-  user-select: none !important;
 }
 </style>
