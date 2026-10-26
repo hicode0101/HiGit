@@ -4,7 +4,7 @@
  * 点击查看差异）+ 提交者 + 消息（字符计数 / Signed-off-by）+ Amend 修补 +
  * 提交到新分支 + 提交并推送 */
 import { computed, onMounted, ref, watch } from "vue";
-import { store } from "../store";
+import { store, showError, toast } from "../store";
 import { api } from "../api";
 import type { CommitPreviewDto, StagedFileDto } from "../api/types";
 import { doCommit, openSyncDialog } from "../tasks";
@@ -18,6 +18,9 @@ const preview = ref<CommitPreviewDto | null>(null);
 const message = ref("");
 const checked = ref<Set<string>>(new Set());
 const committing = ref(false);
+const enabling = ref(false);
+/** 变更清单加载中（大仓库降级枚举可达数秒，避免空列表被误解为无变更） */
+const loading = ref(true);
 
 // ---- TortoiseGit 式选项 ----
 const amend = ref(false);
@@ -42,6 +45,9 @@ const canCommit = computed(
     (!newBranchEnabled.value || newBranchName.value.trim().length > 0),
 );
 const hasHead = computed(() => !!store.status?.head);
+/** 因超过 Windows MAX_PATH(260) 被降级枚举隐藏的文件数 */
+const longPathCount = computed(() => preview.value?.longPathCount ?? 0);
+const longPathTip = computed(() => preview.value?.longPathSamples.join("\n") ?? "");
 
 /** 提交范围 = 变更页面包屑所在目录（根 = 整个仓库） */
 const scopeDir = computed(() => store.currentDir);
@@ -54,14 +60,39 @@ function displayPath(p: string): string {
     : p;
 }
 
-onMounted(async () => {
+async function load() {
+  loading.value = true;
   try {
     preview.value = await api.commitPreview(scopeDir.value);
     checked.value = new Set(preview.value.files.map((f) => f.path));
-  } catch {
+  } catch (e) {
+    // 预览失败不再静默关窗：给出错误提示（此前超长路径问题因此长期黑盒）
+    showError(e as Error);
     emit("close");
+  } finally {
+    loading.value = false;
   }
-});
+}
+
+onMounted(load);
+
+/** 启用仓库级长路径支持：写 core.longpaths=true → 重开会话（libgit2 按新配置
+ * 枚举 / 暂存）→ 整表刷新，被隐藏的超长路径文件随之入列且可提交 */
+async function enableLongPaths() {
+  if (enabling.value) return;
+  enabling.value = true;
+  try {
+    await api.enableCoreLongpaths();
+    const { openRepo } = await import("../store");
+    await openRepo(store.repoPath);
+    toast(t("Long path support enabled"));
+    await load();
+  } catch (e) {
+    showError(e as Error);
+  } finally {
+    enabling.value = false;
+  }
+}
 
 function toggleAll(on: boolean) {
   checked.value = on ? new Set(visibleFiles.value.map((f) => f.path)) : new Set();
@@ -227,7 +258,7 @@ function statusClass(kind: string): string {
       class="commit-msg"
       :placeholder="t('Commit message')"
       rows="4"
-      :disabled="totalCount === 0"
+      :disabled="!!preview && totalCount === 0"
     />
     <div class="msg-count-line">
       <span class="msg-count">{{ message.length }}</span>
@@ -256,6 +287,25 @@ function statusClass(kind: string): string {
       </label>
     </div>
 
+    <div v-if="longPathCount > 0" class="lp-hint">
+      <IconGlyph name="warn" :size="14" />
+      <span class="lp-text" :title="longPathTip">
+        {{
+          t("Files over the Windows 260-character path limit are hidden from the list", {
+            n: longPathCount,
+          })
+        }}
+      </span>
+      <button
+        class="chip"
+        :disabled="enabling"
+        :title="t('Write core.longpaths=true to the repository config, then reload')"
+        @click="enableLongPaths"
+      >
+        {{ enabling ? t("Enabling…") : t("Enable long path support") }}
+      </button>
+    </div>
+
     <div class="file-list">
       <div class="list-head">
         <div class="col-check">
@@ -274,6 +324,10 @@ function statusClass(kind: string): string {
         <div class="col-mtime">{{ t("Last Modified") }}</div>
       </div>
       <div class="list-body">
+        <div v-if="loading" class="list-loading">
+          <div class="load-bar"></div>
+          <span class="load-text">{{ t("Loading changed files…") }}</span>
+        </div>
         <div v-for="f in visibleFiles" :key="f.path" class="file-row" @click="openDiff(f)">
           <div class="col-check" @click.stop>
             <input
@@ -300,7 +354,8 @@ function statusClass(kind: string): string {
 
     <div class="dlg-actions">
       <span class="sel-count">
-        <template v-if="totalCount === 0">{{ t("No changes") }}</template>
+        <template v-if="loading">{{ t("Loading changed files…") }}</template>
+        <template v-else-if="totalCount === 0">{{ t("No changes") }}</template>
         <template v-else>{{ t("Selected") }} {{ checkedCount }} / {{ totalCount }}</template>
       </span>
       <span class="push-btns">
@@ -433,6 +488,28 @@ function statusClass(kind: string): string {
   flex-direction: column;
 }
 
+.lp-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--status-modified);
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.lp-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
 .list-head {
   display: flex;
   align-items: center;
@@ -544,6 +621,45 @@ function statusClass(kind: string): string {
   text-align: center;
   color: var(--text-tertiary);
   padding: 28px 0;
+}
+
+.list-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 30px 0 34px;
+}
+
+.load-bar {
+  width: 220px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-hover);
+  overflow: hidden;
+  position: relative;
+}
+
+.load-bar::after {
+  content: "";
+  position: absolute;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: load-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes load-slide {
+  to {
+    left: 100%;
+  }
+}
+
+.load-text {
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
 .dlg-actions {

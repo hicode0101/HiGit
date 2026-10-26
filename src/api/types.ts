@@ -34,6 +34,10 @@ export interface CommitPreviewDto {
   path: string;
   committer: string;
   files: StagedFileDto[];
+  /** 因超过 Windows MAX_PATH(260) 无法列入清单的文件数（> 0 时提示可启用长路径支持） */
+  longPathCount: number;
+  /** 超长路径样例（最多 3 条，供提示悬停展示） */
+  longPathSamples: string[];
 }
 
 export interface HeadDto {

@@ -9,7 +9,7 @@ mod error;
 mod platform;
 mod state;
 
-use higit_git::factory::{BackendKind, create_backend};
+use higit_git::factory::{create_backend, BackendKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -45,6 +45,7 @@ pub fn run() {
             commands::clean_worktree,
             commands::commit,
             commands::commit_preview,
+            commands::enable_core_longpaths,
             commands::last_commit_message,
             commands::diff_file,
             commands::commit_file_diff,

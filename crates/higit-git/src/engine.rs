@@ -6,8 +6,8 @@
 //! - `RepoSession` 对外不透明，内部按后端持有句柄；`git2::Repository` 等类型禁止越过本 crate。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::error::{HigitError, Result};
 use crate::model::{
@@ -282,6 +282,20 @@ pub struct ChangeFileInfo {
     pub deletions: Option<u32>,
 }
 
+/// 提交预览结果：变更文件清单 + 超长路径统计。
+///
+/// Windows 下 libgit2 枚举工作区时对超过 MAX_PATH(260) 的路径直接报错且无法
+/// 单条跳过；降级枚举（非递归 status + 自行遍历未跟踪目录）会跳过这些文件并
+/// 在此汇报数量与样例，由 UI 提示用户可启用长路径支持（core.longpaths）。
+#[derive(Debug, Clone, Default)]
+pub struct CommitPreviewData {
+    pub files: Vec<ChangeFileInfo>,
+    /// 因超过 Windows MAX_PATH 无法列入清单的文件数
+    pub long_path_count: u32,
+    /// 超长路径样例（最多 3 条，供提示展示）
+    pub long_path_samples: Vec<String>,
+}
+
 /// 同步 Git 操作引擎（含网络长任务；实现方必须支持进度上报与取消，FR-5.10）。
 pub trait GitEngine: Send + Sync {
     /// 在空目录创建新仓库（FR-1.1），默认分支为 main。
@@ -465,8 +479,15 @@ pub trait GitEngine: Send + Sync {
     /// 提交预览（提交对话框）：工作区全部变更文件（含未暂存 / 未跟踪），
     /// 仅列 `dir`（相对仓库根，空 = 根目录）目录下的条目；
     /// 细化状态 + 是否已暂存 + 大小 + 修改时间；提交时按前端勾选自动暂存。
-    fn commit_preview(&self, _session: &RepoSession, _dir: &str) -> Result<Vec<ChangeFileInfo>> {
+    /// Windows 仓库含超长路径文件时自动降级枚举并汇报 `long_path_count`。
+    fn commit_preview(&self, _session: &RepoSession, _dir: &str) -> Result<CommitPreviewData> {
         Err(HigitError::not_implemented("commit_preview"))
+    }
+
+    /// 一键启用仓库级长路径支持（写本地 core.longpaths = true，用户显式操作）。
+    /// 写入后调用方需重新打开仓库会话，libgit2 才会按新配置枚举 / 暂存。
+    fn enable_core_longpaths(&self, _session: &RepoSession) -> Result<()> {
+        Err(HigitError::not_implemented("enable_core_longpaths"))
     }
 
     /// 按路径提交（提交对话框勾选语义）：勾选路径已由调用方先行暂存，

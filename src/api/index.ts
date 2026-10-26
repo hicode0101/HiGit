@@ -108,6 +108,8 @@ export const api = {
       newBranch: newBranch ?? null,
     }),
   commitPreview: (rel: string) => invoke<CommitPreviewDto>("commit_preview", { rel }),
+  /** 启用当前仓库的长路径支持（写本地 core.longpaths=true）；随后需 openRepo 重开会话 */
+  enableCoreLongpaths: () => invoke<void>("enable_core_longpaths"),
   lastCommitMessage: () => invoke<CommitMessageDto | null>("last_commit_message"),
   diffFile: (path: string, spec: "workdir" | "staged") =>
     invoke<DiffDto>("diff_file", { path, spec }),

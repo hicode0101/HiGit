@@ -4,8 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -189,11 +189,7 @@ pub async fn get_state(app: AppHandle) -> CmdResult<BootstrapDto> {
     let proxy_on = config.proxy_enabled && !config.proxy.trim().is_empty();
     let engine = app.state::<AppState>().engine.clone();
     run_blocking(move || {
-        engine.set_proxy(if proxy_on {
-            Some(proxy.as_str())
-        } else {
-            None
-        });
+        engine.set_proxy(if proxy_on { Some(proxy.as_str()) } else { None });
         let sys_lang = sys_locale::get_locale().unwrap_or_else(|| "en".to_string());
         Ok(BootstrapDto {
             config: to_config_dto(&config),
@@ -291,11 +287,13 @@ pub async fn save_config(app: AppHandle, config: ConfigDto) -> CmdResult<()> {
             cfg.recent_repos = cur.recent_repos.clone();
             cfg.last_repo = cur.last_repo.clone();
         }
-        state.engine.set_proxy(if cfg.proxy_enabled && !cfg.proxy.trim().is_empty() {
-            Some(cfg.proxy.as_str())
-        } else {
-            None
-        });
+        state
+            .engine
+            .set_proxy(if cfg.proxy_enabled && !cfg.proxy.trim().is_empty() {
+                Some(cfg.proxy.as_str())
+            } else {
+                None
+            });
         *state.config.lock().unwrap() = cfg;
         state.save_config();
         Ok(())
@@ -994,15 +992,22 @@ pub async fn commit(
         with_session(&state, |state, h| {
             let author = commit_identity(state, &h.path);
             // 新分支：与 HEAD 同树，仅移动 HEAD 符号引用，无需检出文件
-            if let Some(nb) = new_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(nb) = new_branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 state.engine.create_branch(&h.session, nb, None)?;
                 state.engine.switch_head(&h.session, nb)?;
             }
             let oid = if amend {
                 if let Some(paths) = paths.filter(|p| !p.is_empty()) {
-                    state
-                        .engine
-                        .commit_amend_partial(&h.session, &message, author.as_ref(), &paths)?
+                    state.engine.commit_amend_partial(
+                        &h.session,
+                        &message,
+                        author.as_ref(),
+                        &paths,
+                    )?
                 } else {
                     state
                         .engine
@@ -1052,6 +1057,10 @@ pub struct CommitPreviewDto {
     /// "name <email>"；未配置身份时为空串
     pub committer: String,
     pub files: Vec<CommitFileDto>,
+    /// 因超过 Windows MAX_PATH(260) 无法列入清单的文件数（> 0 时 UI 提示可启用长路径支持）
+    pub long_path_count: u32,
+    /// 超长路径样例（最多 3 条，供提示悬停展示）
+    pub long_path_samples: Vec<String>,
 }
 
 /// 提交对话框预览：仓库名 + 提交者 + `rel` 目录下的全部变更文件（状态 / 大小 / 修改时间）。
@@ -1060,15 +1069,16 @@ pub async fn commit_preview(app: AppHandle, rel: String) -> CmdResult<CommitPrev
     run_blocking(move || {
         let state = app.state::<AppState>();
         with_session(&state, |state, h| {
-            let mut files = state.engine.commit_preview(&h.session, &rel)?;
+            let mut preview = state.engine.commit_preview(&h.session, &rel)?;
             // 行级变更统计（+行 / -行）；文件过多时引擎侧整体返回 None
-            let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+            let paths: Vec<String> = preview.files.iter().map(|f| f.path.clone()).collect();
             let stats = state.engine.change_stats(&h.session, &paths)?;
-            for (f, (a, d)) in files.iter_mut().zip(stats) {
+            for (f, (a, d)) in preview.files.iter_mut().zip(stats) {
                 f.additions = a;
                 f.deletions = d;
             }
-            let files = files
+            let files = preview
+                .files
                 .into_iter()
                 .map(|f| CommitFileDto {
                     path: f.path,
@@ -1100,7 +1110,23 @@ pub async fn commit_preview(app: AppHandle, rel: String) -> CmdResult<CommitPrev
                     .map(|i| format!("{} <{}>", i.name, i.email))
                     .unwrap_or_default(),
                 files,
+                long_path_count: preview.long_path_count,
+                long_path_samples: preview.long_path_samples,
             })
+        })
+    })
+    .await
+}
+
+/// 启用当前仓库的长路径支持（写本地 core.longpaths = true，提交对话框的
+/// 显式入口）。写入后需重新打开仓库会话（open_repo）让 libgit2 按新配置
+/// 枚举 / 暂存，前端随后刷新提交预览。
+#[tauri::command]
+pub async fn enable_core_longpaths(app: AppHandle) -> CmdResult<()> {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        with_session(&state, |_state, h| {
+            Ok(state.engine.enable_core_longpaths(&h.session)?)
         })
     })
     .await
@@ -1274,7 +1300,10 @@ fn progress_cb(app: AppHandle, job_id: u32) -> impl Fn(Progress) + Send + Sync +
 fn https_host(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?']).next()?;
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = authority.split(':').next()?;
     (!host.is_empty()).then(|| host.to_string())
 }
@@ -1284,7 +1313,7 @@ fn https_host(url: &str) -> Option<String> {
 fn repo_https_url(state: &AppState, repo: &Path, url_override: &str) -> Option<String> {
     let url = if url_override.trim().is_empty() {
         let session = state.engine.open(repo).ok()?;
-        state.engine.remote_url(&session, "origin").ok()?? 
+        state.engine.remote_url(&session, "origin").ok()??
     } else {
         url_override.trim().to_string()
     };
@@ -1960,7 +1989,11 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
         let proxy_cfg = proxy_in_use(&state);
         emit_log(
             "info",
-            egress_note(remote_url.as_deref().unwrap_or(""), proxy_cfg.as_deref(), zh),
+            egress_note(
+                remote_url.as_deref().unwrap_or(""),
+                proxy_cfg.as_deref(),
+                zh,
+            ),
         );
         if let Some(h) = socks_proxy_hint(proxy_cfg.as_deref(), zh) {
             emit_log("warn", h);
@@ -2193,9 +2226,14 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                         let updated = v.get("updated").and_then(|x| x.as_bool()).unwrap_or(false);
                         let short = v.get("headShortId").and_then(|x| x.as_str()).unwrap_or("");
                         let rebased = v.get("rebased").and_then(|x| x.as_u64()).unwrap_or(0);
-                        let ff = v.get("fastForward").and_then(|x| x.as_bool()).unwrap_or(false);
-                        let pending =
-                            v.get("pendingCommit").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let ff = v
+                            .get("fastForward")
+                            .and_then(|x| x.as_bool())
+                            .unwrap_or(false);
+                        let pending = v
+                            .get("pendingCommit")
+                            .and_then(|x| x.as_bool())
+                            .unwrap_or(false);
                         let conflicts: Vec<String> = v
                             .get("conflicts")
                             .and_then(|x| x.as_array())
@@ -2231,8 +2269,12 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                             emit_log(
                                 "ok",
                                 lz(
-                                    &format!("已变基 {rebased} 个提交 → {short}（耗时 {elapsed} ms）"),
-                                    &format!("Rebased {rebased} commit(s) -> {short} ({elapsed} ms)"),
+                                    &format!(
+                                        "已变基 {rebased} 个提交 → {short}（耗时 {elapsed} ms）"
+                                    ),
+                                    &format!(
+                                        "Rebased {rebased} commit(s) -> {short} ({elapsed} ms)"
+                                    ),
                                 ),
                             );
                         } else if updated && !short.is_empty() {
@@ -2245,7 +2287,11 @@ pub async fn sync_start(app: AppHandle, req: SyncStartReq) -> CmdResult<u32> {
                                     ),
                                     &format!(
                                         "{} {short} ({elapsed} ms)",
-                                        if ff { "Fast-forwarded to" } else { "Updated to" }
+                                        if ff {
+                                            "Fast-forwarded to"
+                                        } else {
+                                            "Updated to"
+                                        }
                                     ),
                                 ),
                             );
@@ -2420,10 +2466,7 @@ pub async fn clone_repo(app: AppHandle, req: CloneReq) -> CmdResult<u32> {
             },
         );
         let proxy_cfg = proxy_in_use(&state);
-        emit_log(
-            "info",
-            egress_note(&url, proxy_cfg.as_deref(), zh),
-        );
+        emit_log("info", egress_note(&url, proxy_cfg.as_deref(), zh));
         if let Some(h) = socks_proxy_hint(proxy_cfg.as_deref(), zh) {
             emit_log("warn", h);
         }
@@ -2921,32 +2964,36 @@ mod net_note_tests {
 
     #[test]
     fn egress_https_direct_when_proxy_off() {
-        let zh = egress_note(
-            "https://github.com/hicode0101/HiGit.git",
-            None,
-            true,
-        );
+        let zh = egress_note("https://github.com/hicode0101/HiGit.git", None, true);
         assert_eq!(zh, "出网方式: 直连");
-        let en = egress_note(
-            "https://github.com/hicode0101/HiGit.git",
-            None,
-            false,
-        );
+        let en = egress_note("https://github.com/hicode0101/HiGit.git", None, false);
         assert_eq!(en, "Network: direct connection");
     }
 
     #[test]
     fn egress_https_via_proxy_when_enabled() {
-        let zh = egress_note("https://github.com/x/y.git", Some("socks5://127.0.0.1:1080"), true);
+        let zh = egress_note(
+            "https://github.com/x/y.git",
+            Some("socks5://127.0.0.1:1080"),
+            true,
+        );
         assert!(zh.contains("走代理"), "zh: {zh}");
         assert!(zh.contains("socks5://127.0.0.1:1080"), "zh: {zh}");
-        let en = egress_note("https://github.com/x/y.git", Some("http://127.0.0.1:7891"), false);
+        let en = egress_note(
+            "https://github.com/x/y.git",
+            Some("http://127.0.0.1:7891"),
+            false,
+        );
         assert!(en.contains("proxy http://127.0.0.1:7891"), "en: {en}");
     }
 
     #[test]
     fn egress_ssh_is_direct() {
-        let zh = egress_note("git@github.com:hicode0101/test1.git", Some("http://127.0.0.1:7891"), true);
+        let zh = egress_note(
+            "git@github.com:hicode0101/test1.git",
+            Some("http://127.0.0.1:7891"),
+            true,
+        );
         assert!(zh.contains("直连"), "SSH 代理设置不生效，应为直连: {zh}");
         let en = egress_note("ssh://git@github.com/x/y.git", None, false);
         assert!(en.contains("direct"), "en: {en}");
@@ -2982,7 +3029,10 @@ mod net_note_tests {
             password: "secret".to_string(),
         };
         let line = auth_note(Some(&http), true);
-        assert!(line.contains("HTTPS") && line.contains("hicode0101"), "{line}");
+        assert!(
+            line.contains("HTTPS") && line.contains("hicode0101"),
+            "{line}"
+        );
         // 日志不得包含密码
         assert!(!line.contains("secret"));
         assert!(auth_note(None, true).contains("默认"));

@@ -8,7 +8,7 @@
 //!     branches / create / checkout / rename / delete / merge（FR-7），
 //!     提交识别 MERGE_HEAD（冲突解决后可落合并提交，FR-5.8 P0）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,9 +26,9 @@ const DIFF_LINE_CAP: usize = 4000;
 const COMMIT_STATS_MAX_FILES: usize = 200;
 
 use crate::engine::{
-    CancelToken, ChangeFileInfo, CloneRequest, Credentials, FetchUpdate, GitEngine, Progress,
-    PullOptions, PullOutcome, PushRequest, PushPreview, PushOutcome, RepoSession, SessionInner,
-    SyncEvent,
+    CancelToken, ChangeFileInfo, CloneRequest, CommitPreviewData, Credentials, FetchUpdate,
+    GitEngine, Progress, PullOptions, PullOutcome, PushOutcome, PushPreview, PushRequest,
+    RepoSession, SessionInner, SyncEvent,
 };
 use crate::error::{AuthDetail, AuthKind, ErrorCode, HigitError, Result};
 use crate::model::{
@@ -208,7 +208,8 @@ impl Git2Backend {
 
         let before = Self::remote_ref_snapshot(repo, &name);
         let auth = on_event.map(AuthLog::new);
-        let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
+        let cbs =
+            self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
         let mut opts = git2::FetchOptions::new();
         opts.remote_callbacks(cbs);
         opts.prune(FetchPrune::On);
@@ -274,24 +275,18 @@ impl Git2Backend {
                 format!("分支 {branch} 未设置上游，无法拉取；请先推送一次（-u 建立上游）或在仓库设置中配置"),
             )
         })?;
-        let up_name = upstream
-            .name()
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                HigitError::new(
-                    ErrorCode::NoUpstream,
-                    format!("分支 {branch} 的上游引用名无法解析，无法拉取"),
-                )
-            })?;
-        let (remote_name, remote_branch) = up_name
-            .split_once('/')
-            .ok_or_else(|| {
-                HigitError::new(
-                    ErrorCode::NoUpstream,
-                    format!("上游 {up_name} 不是有效的 <远端>/<分支> 形式，无法拉取"),
-                )
-            })?;
+        let up_name = upstream.name().ok().flatten().ok_or_else(|| {
+            HigitError::new(
+                ErrorCode::NoUpstream,
+                format!("分支 {branch} 的上游引用名无法解析，无法拉取"),
+            )
+        })?;
+        let (remote_name, remote_branch) = up_name.split_once('/').ok_or_else(|| {
+            HigitError::new(
+                ErrorCode::NoUpstream,
+                format!("上游 {up_name} 不是有效的 <远端>/<分支> 形式，无法拉取"),
+            )
+        })?;
 
         // 仅抓取当前分支的上游 refspec（可附 --tags）
         let mut r = repo
@@ -304,7 +299,8 @@ impl Git2Backend {
         );
         log("dim", format!("远端: {url}"));
         let auth = on_event.map(AuthLog::new);
-        let cbs = self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
+        let cbs =
+            self.build_verbose_callbacks(creds, &url, progress, on_event, auth.as_ref(), cancel);
         let mut fopts = git2::FetchOptions::new();
         fopts.remote_callbacks(cbs);
         if let Some(px) = self.proxy_opts() {
@@ -364,9 +360,14 @@ impl Git2Backend {
         if ff_able {
             // no_ff / squash 需要产生合并动作（squash 不移动分支引用）
             if opts.no_ff || opts.squash {
-                return Ok(PullPlan::Merge { up_name: up_name.to_string() });
+                return Ok(PullPlan::Merge {
+                    up_name: up_name.to_string(),
+                });
             }
-            return Ok(PullPlan::FastForward { up_oid, up_name: up_name.to_string() });
+            return Ok(PullPlan::FastForward {
+                up_oid,
+                up_name: up_name.to_string(),
+            });
         }
         if opts.rebase {
             return Ok(PullPlan::Rebase {
@@ -501,6 +502,95 @@ impl Git2Backend {
             rebased,
             pending_commit: false,
             conflicts: Vec::new(),
+        })
+    }
+
+    /// 常规路径：libgit2 递归枚举全部变更（未跟踪目录展开到文件级）。
+    fn commit_preview_recursive(
+        &self,
+        session: &RepoSession,
+        dir: &str,
+    ) -> Result<Vec<ChangeFileInfo>> {
+        self.with_session(session, |s, repo| {
+            let mut opts = git2::StatusOptions::new();
+            opts.include_untracked(true).recurse_untracked_dirs(true);
+            let statuses = repo
+                .statuses(Some(&mut opts))
+                .map_err(|e| HigitError::new(ErrorCode::StatusFailed, e.message()))?;
+
+            let dir = dir.trim_matches('/');
+            let dir_prefix = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            };
+            let mut files = Vec::new();
+            for item in statuses.iter() {
+                let st = item.status();
+                let Ok(path) = item.path() else {
+                    continue;
+                };
+                let path = path.trim_end_matches('/');
+                if st.is_empty() || st.intersects(git2::Status::IGNORED) {
+                    continue;
+                }
+                if !dir_prefix.is_empty() && path != dir && !path.starts_with(&dir_prefix) {
+                    continue;
+                }
+                files.push(change_file_entry(s.workdir.as_path(), path, st));
+            }
+            Ok(files)
+        })
+    }
+
+    /// 降级路径：libgit2 只要枚举未跟踪目录就会校验其中的路径（含对直接子级
+    /// 的窥探），因此改用「仅跟踪变更」的 status（迭代器不进未跟踪目录）+
+    /// 索引引导的自研遍历收集未跟踪文件。极端情况（超长未跟踪文件位于已跟踪
+    /// 目录内）status 仍会失败，此时原样回传错误。
+    fn commit_preview_degraded(
+        &self,
+        session: &RepoSession,
+        dir: &str,
+    ) -> Result<CommitPreviewData> {
+        self.with_session(session, |s, repo| {
+            // 默认标志 = 仅跟踪变更（staged / modified / deleted / conflicted）
+            let mut opts = git2::StatusOptions::new();
+            let statuses = repo
+                .statuses(Some(&mut opts))
+                .map_err(|e| HigitError::new(ErrorCode::StatusFailed, e.message()))?;
+
+            let tracked = collect_tracked_paths(repo)?;
+            let mut data = CommitPreviewData::default();
+            for item in statuses.iter() {
+                let st = item.status();
+                let Ok(path) = item.path() else {
+                    continue;
+                };
+                let path = path.trim_end_matches('/');
+                if st.is_empty() || st.intersects(git2::Status::IGNORED) {
+                    continue;
+                }
+                data.files
+                    .push(change_file_entry(s.workdir.as_path(), path, st));
+            }
+            walk_untracked(
+                &s.workdir,
+                repo,
+                "",
+                &tracked,
+                &mut data.files,
+                &mut data.long_path_count,
+                &mut data.long_path_samples,
+                0,
+            );
+            let dir = dir.trim_matches('/');
+            if !dir.is_empty() {
+                let dir_prefix = format!("{dir}/");
+                data.files
+                    .retain(|f| f.path == dir || f.path.starts_with(&dir_prefix));
+            }
+            data.files.sort_by(|a, b| a.path.cmp(&b.path));
+            Ok(data)
         })
     }
 }
@@ -1282,7 +1372,8 @@ impl GitEngine for Git2Backend {
                 if o.pending_commit {
                     log(
                         "ok",
-                        "merge prepared without commit (--no-commit / --squash); commit manually".into(),
+                        "merge prepared without commit (--no-commit / --squash); commit manually"
+                            .into(),
                     );
                     return Ok(PullOutcome {
                         pending_commit: true,
@@ -1435,7 +1526,10 @@ impl GitEngine for Git2Backend {
     fn clean_worktree(&self, session: &RepoSession, opts: &CleanOptions) -> Result<CleanOutcome> {
         self.with_session(session, |s, repo| {
             let mut sopts = git2::StatusOptions::new();
-            sopts.include_untracked(true).include_ignored(true).exclude_submodules(true);
+            sopts
+                .include_untracked(true)
+                .include_ignored(true)
+                .exclude_submodules(true);
             let statuses = repo
                 .statuses(Some(&mut sopts))
                 .map_err(|e| HigitError::new(ErrorCode::StatusFailed, e.message()))?;
@@ -1491,9 +1585,7 @@ impl GitEngine for Git2Backend {
                 };
                 match result {
                     Ok(()) => outcome.paths.push(rel.clone()),
-                    Err(e) => outcome
-                        .failed
-                        .push((rel.clone(), e.to_string())),
+                    Err(e) => outcome.failed.push((rel.clone(), e.to_string())),
                 }
             }
             Ok(outcome)
@@ -1584,76 +1676,42 @@ impl GitEngine for Git2Backend {
     /// 提交预览（提交对话框）：工作区全部变更文件（含未暂存 / 未跟踪 / 冲突），
     /// 仅列 `dir` 目录下的条目；细化状态 + 是否已暂存 + 磁盘大小 / 修改时间；
     /// 文件不存在一律按删除展示。
-    fn commit_preview(&self, session: &RepoSession, dir: &str) -> Result<Vec<ChangeFileInfo>> {
-        self.with_session(session, |s, repo| {
-            let mut opts = git2::StatusOptions::new();
-            opts.include_untracked(true).recurse_untracked_dirs(true);
-            let statuses = repo
-                .statuses(Some(&mut opts))
-                .map_err(|e| HigitError::new(ErrorCode::StatusFailed, e.message()))?;
+    ///
+    /// libgit2 枚举时对超过 Windows MAX_PATH(260) 的路径直接报错且无法单条跳过
+    /// （git CLI 的策略是静默跳过），此时降级：用「仅跟踪变更」的 status（迭代器
+    /// 不进未跟踪目录）+ 索引引导的自研遍历收集未跟踪文件，超长路径跳过并计数，
+    /// 由 UI 提示可启用长路径支持。
+    fn commit_preview(&self, session: &RepoSession, dir: &str) -> Result<CommitPreviewData> {
+        match self.commit_preview_recursive(session, dir) {
+            Ok(files) => Ok(CommitPreviewData {
+                files,
+                ..CommitPreviewData::default()
+            }),
+            Err(e) if is_path_too_long(&e) => self.commit_preview_degraded(session, dir),
+            Err(e) => Err(e),
+        }
+    }
 
-            let dir = dir.trim_matches('/');
-            let dir_prefix = if dir.is_empty() {
-                String::new()
-            } else {
-                format!("{dir}/")
-            };
-            let mut files = Vec::new();
-            for item in statuses.iter() {
-                let st = item.status();
-                let Ok(path) = item.path() else {
-                    continue;
-                };
-                let path = path.trim_end_matches('/');
-                if st.is_empty() || st.intersects(git2::Status::IGNORED) {
-                    continue;
-                }
-                if !dir_prefix.is_empty() && path != dir && !path.starts_with(&dir_prefix) {
-                    continue;
-                }
-                let md = std::fs::metadata(s.workdir.join(path)).ok();
-                let staged = st.intersects(
-                    git2::Status::INDEX_NEW
-                        | git2::Status::INDEX_MODIFIED
-                        | git2::Status::INDEX_DELETED
-                        | git2::Status::INDEX_RENAMED
-                        | git2::Status::INDEX_TYPECHANGE,
-                );
-                let kind = if st.contains(git2::Status::CONFLICTED) {
-                    "conflicted"
-                } else if md.is_none() {
-                    // 磁盘上不存在：暂存删除 / 未暂存删除 / 暂存新增后又被删，都按删除展示
-                    "deleted"
-                } else if st.intersects(git2::Status::WT_NEW | git2::Status::INDEX_NEW) {
-                    "added"
-                } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                    "renamed"
-                } else {
-                    "modified"
-                };
-                let size = md.as_ref().map(|m| m.len());
-                let mtime_unix = md
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64);
-                files.push(ChangeFileInfo {
-                    path: path.to_string(),
-                    kind: kind.to_string(),
-                    staged,
-                    size,
-                    mtime_unix,
-                    additions: None,
-                    deletions: None,
-                });
-            }
-            Ok(files)
+    /// 启用仓库级长路径支持：写本地 core.longpaths = true（用户显式操作，
+    /// 覆盖既有值）。写入后调用方需重开会话让 libgit2 按新配置枚举 / 暂存。
+    fn enable_core_longpaths(&self, session: &RepoSession) -> Result<()> {
+        self.with_session(session, |_s, repo| {
+            let mut config = repo
+                .config()
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+            config
+                .set_bool("core.longpaths", true)
+                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))
         })
     }
 
     /// 提交对话框的行级变更统计（+行 / -行）：逐文件 diff HEAD↔工作区（含索引）。
     /// 每个文件一次 pathspec 限定 diff；文件数超过上限时整体跳过（性能保护）。
-    fn change_stats(&self, session: &RepoSession, paths: &[String]) -> Result<Vec<(Option<u32>, Option<u32>)>> {
+    fn change_stats(
+        &self,
+        session: &RepoSession,
+        paths: &[String],
+    ) -> Result<Vec<(Option<u32>, Option<u32>)>> {
         self.with_session(session, |_s, repo| {
             if paths.len() > COMMIT_STATS_MAX_FILES {
                 return Ok(vec![(None, None); paths.len()]);
@@ -2065,7 +2123,10 @@ impl GitEngine for Git2Backend {
             let mut outcome = CheckoutOutcome::default();
             let target = opts.target.trim();
             if target.is_empty() {
-                return Err(HigitError::new(ErrorCode::Unknown, "checkout target is empty"));
+                return Err(HigitError::new(
+                    ErrorCode::Unknown,
+                    "checkout target is empty",
+                ));
             }
 
             // 1) 目标解析为提交 id；分支目标额外记录远端引用名（跟踪用）
@@ -2104,7 +2165,11 @@ impl GitEngine for Git2Backend {
             };
 
             // 2) merge：先把未提交修改 stash 起来，检出后恢复（工作区无改动时跳过）
-            let stashed = if opts.merge { stash_workdir(repo)? } else { false };
+            let stashed = if opts.merge {
+                stash_workdir(repo)?
+            } else {
+                false
+            };
 
             // 3) 确定 HEAD 去向：新建分支 / 跟踪远端 → 先建本地分支；
             //    远端不跟踪或标签 / 提交 → 分离 HEAD；否则指向本地分支
@@ -2288,27 +2353,25 @@ impl GitEngine for Git2Backend {
 
             // 来源解析为提交 + 消息/日志用的描述与短标签
             let (their_commit, source_desc) = match opts.kind {
-                CheckoutTargetKind::Branch => {
-                    match repo.find_branch(source, BranchType::Local) {
-                        Ok(b) => (
+                CheckoutTargetKind::Branch => match repo.find_branch(source, BranchType::Local) {
+                    Ok(b) => (
+                        b.get()
+                            .peel_to_commit()
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
+                        format!("branch '{source}'"),
+                    ),
+                    Err(_) => {
+                        let b = repo
+                            .find_branch(source, BranchType::Remote)
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+                        (
                             b.get()
                                 .peel_to_commit()
                                 .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
-                            format!("branch '{source}'"),
-                        ),
-                        Err(_) => {
-                            let b = repo
-                                .find_branch(source, BranchType::Remote)
-                                .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-                            (
-                                b.get()
-                                    .peel_to_commit()
-                                    .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
-                                format!("remote-tracking branch '{source}'"),
-                            )
-                        }
+                            format!("remote-tracking branch '{source}'"),
+                        )
                     }
-                }
+                },
                 CheckoutTargetKind::Tag => {
                     let obj = repo
                         .revparse_single(&format!("refs/tags/{source}"))
@@ -2360,7 +2423,12 @@ impl GitEngine for Git2Backend {
                 let log = merge_log(repo, head_oid, their_oid, &log_label, opts.log_messages)?;
                 Ok(format!("{base}\n\n{log}"))
             };
-            let msg = match opts.message.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let msg = match opts
+                .message
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 Some(m) => m.to_string(),
                 None => auto_msg(repo)?,
             };
@@ -2397,9 +2465,9 @@ impl GitEngine for Git2Backend {
                         &sig,
                         &sig,
                         &msg,
-                        &head_commit.tree().map_err(|e| {
-                            HigitError::new(ErrorCode::Unknown, e.message())
-                        })?,
+                        &head_commit
+                            .tree()
+                            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?,
                         &[&head_commit, &their_commit],
                     )
                     .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
@@ -2707,7 +2775,9 @@ fn stash_workdir(repo: &mut Repository) -> Result<bool> {
     if !dirty {
         return Ok(false);
     }
-    let sig = repo.signature().map_err(|_| HigitError::identity_missing())?;
+    let sig = repo
+        .signature()
+        .map_err(|_| HigitError::identity_missing())?;
     repo.stash_save2(&sig, None, None)
         .map(|_| true)
         .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))
@@ -2721,7 +2791,9 @@ fn local_branch_name(repo: &Repository, remote_ref: &str) -> Result<String> {
         .remotes()
         .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
     for i in 0..remotes.len() {
-        let Ok(Some(r)) = remotes.get(i) else { continue };
+        let Ok(Some(r)) = remotes.get(i) else {
+            continue;
+        };
         if let Some(stripped) = short.strip_prefix(&format!("{r}/")) {
             return Ok(stripped.to_string());
         }
@@ -2743,36 +2815,33 @@ fn merge_signature(repo: &Repository) -> Result<Signature<'_>> {
         .ok()
         .filter(|s| !s.is_empty());
     match (name, email) {
-        (Some(n), Some(e)) => Signature::now(&n, &e)
-            .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message())),
+        (Some(n), Some(e)) => {
+            Signature::now(&n, &e).map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))
+        }
         _ => Err(HigitError::identity_missing()),
     }
 }
 
 /// merge.log：被合并侧（base..theirs）最近 limit 条提交摘要，git 惯例的短日志段落格式
-fn merge_log(
-    repo: &Repository,
-    base: Oid,
-    theirs: Oid,
-    label: &str,
-    limit: u32,
-) -> Result<String> {
+fn merge_log(repo: &Repository, base: Oid, theirs: Oid, label: &str, limit: u32) -> Result<String> {
     let mut revwalk = repo
         .revwalk()
         .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
-    revwalk.push(theirs).map_err(|e| {
-        HigitError::new(ErrorCode::Unknown, e.message())
-    })?;
-    revwalk.hide(base).map_err(|e| {
-        HigitError::new(ErrorCode::Unknown, e.message())
-    })?;
+    revwalk
+        .push(theirs)
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    revwalk
+        .hide(base)
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
     revwalk
         .set_sorting(Sort::TIME | Sort::TOPOLOGICAL)
         .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
     let mut lines = vec![format!("* {label}:")];
     for oid in revwalk.take(limit as usize) {
         let Ok(oid) = oid else { continue };
-        let Ok(c) = repo.find_commit(oid) else { continue };
+        let Ok(c) = repo.find_commit(oid) else {
+            continue;
+        };
         let summary = c.summary().ok().flatten().unwrap_or_default();
         lines.push(format!("  {summary}"));
     }
@@ -3301,14 +3370,21 @@ fn apply_credentials<'a>(
         } => {
             let agent_available = ssh_agent_available();
             // 日志里的凭证来源：仓库设置 / 对话框显式配置 vs 系统凭证管理器"记住"的凭证
-            let origin = if *from_store { "记住的密钥" } else { "配置的密钥" };
+            let origin = if *from_store {
+                "记住的密钥"
+            } else {
+                "配置的密钥"
+            };
             let issue = (!key_path.is_empty())
                 .then(|| ssh_key_backend_issue(key_path))
                 .unwrap_or(None);
             let configured = issue.is_none();
             // 配置了密钥但引擎后端无法解析：显式提示降级（同步对话框日志）
             if let (Some(a), Some(reason)) = (auth.as_ref(), issue) {
-                a.log("warn", format!("认证: 跳过 {origin} {key_path}（{reason}）"));
+                a.log(
+                    "warn",
+                    format!("认证: 跳过 {origin} {key_path}（{reason}）"),
+                );
             }
             (
                 None,
@@ -3623,6 +3699,196 @@ fn map_status(status: Status, include_ignored: bool) -> Option<FileStatusKind> {
     None
 }
 
+/// libgit2 在 Windows 枚举 / 暂存时对超过 MAX_PATH 的路径报 "path too long"，
+/// 且单条不可跳过 —— 据此判定是否触发提交预览的降级枚举。
+fn is_path_too_long(e: &HigitError) -> bool {
+    e.raw
+        .as_deref()
+        .is_some_and(|raw| raw.contains("path too long"))
+}
+
+/// libgit2 路径长度校验阈值（fs_path.c validate_length）：完整路径 UTF-8 字符数
+/// 须 ≤ MAX_PATH(260)，超出即拒绝（core.longpaths 开启时不校验）。
+const LIBGIT2_MAX_PATH_CHARS: usize = 260;
+
+/// Windows 标准库访问超长路径需要 verbatim（\\?\）前缀；其余平台原样返回。
+fn to_verbatim(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy().replace('/', "\\");
+        if s.starts_with("\\\\?\\") {
+            PathBuf::from(s)
+        } else if let Some(rest) = s.strip_prefix("\\\\") {
+            PathBuf::from(format!("\\\\?\\UNC\\{rest}"))
+        } else {
+            PathBuf::from(format!("\\\\?\\{s}"))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_path_buf()
+    }
+}
+
+/// 完整路径字符数（libgit2 校验对象 = workdir + "/" + rel，分隔符按 1 字符计）
+fn full_path_chars(workdir: &Path, rel: &str) -> usize {
+    workdir.to_string_lossy().chars().count() + 1 + rel.chars().count()
+}
+
+/// 由 status 标志 + 磁盘元数据构造变更条目（递归与降级两条路径共用）；
+/// 磁盘上不存在的路径一律按删除展示（暂存删除 / 新增后又删除）。
+fn change_file_entry(workdir: &Path, path: &str, st: git2::Status) -> ChangeFileInfo {
+    let md = std::fs::metadata(workdir.join(path)).ok();
+    let staged = st.intersects(
+        git2::Status::INDEX_NEW
+            | git2::Status::INDEX_MODIFIED
+            | git2::Status::INDEX_DELETED
+            | git2::Status::INDEX_RENAMED
+            | git2::Status::INDEX_TYPECHANGE,
+    );
+    let kind = if st.contains(git2::Status::CONFLICTED) {
+        "conflicted"
+    } else if md.is_none() {
+        "deleted"
+    } else if st.intersects(git2::Status::WT_NEW | git2::Status::INDEX_NEW) {
+        "added"
+    } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+        "renamed"
+    } else {
+        "modified"
+    };
+    ChangeFileInfo {
+        path: path.to_string(),
+        kind: kind.to_string(),
+        staged,
+        size: md.as_ref().map(|m| m.len()),
+        mtime_unix: md
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64),
+        additions: None,
+        deletions: None,
+    }
+}
+
+/// 降级枚举的未跟踪文件入列：超长路径跳过并计数（UI 提示可启用长路径支持），
+/// 忽略判定复用 libgit2 规则引擎（含 core.ignorecase / excludesFile / 逐级 .gitignore）。
+fn push_untracked_file(
+    workdir: &Path,
+    repo: &Repository,
+    rel: &str,
+    files: &mut Vec<ChangeFileInfo>,
+    long_count: &mut u32,
+    long_samples: &mut Vec<String>,
+) {
+    if full_path_chars(workdir, rel) > LIBGIT2_MAX_PATH_CHARS {
+        *long_count += 1;
+        if long_samples.len() < 3 {
+            long_samples.push(rel.to_string());
+        }
+        return;
+    }
+    if repo.is_path_ignored(rel).unwrap_or(false) {
+        return;
+    }
+    let md = std::fs::symlink_metadata(to_verbatim(&workdir.join(rel))).ok();
+    files.push(ChangeFileInfo {
+        path: rel.to_string(),
+        kind: "added".to_string(),
+        staged: false,
+        size: md.as_ref().map(|m| m.len()),
+        mtime_unix: md
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64),
+        additions: None,
+        deletions: None,
+    });
+}
+
+/// 索引中的全部路径及其祖先目录：目录在集合内 = 含已跟踪内容（需下钻找未跟踪
+/// 新文件）；文件在集合内 = 已跟踪（status 已覆盖，不再重复列出）。
+fn collect_tracked_paths(repo: &Repository) -> Result<HashSet<String>> {
+    let index = repo
+        .index()
+        .map_err(|e| HigitError::new(ErrorCode::Unknown, e.message()))?;
+    let mut set = HashSet::new();
+    for entry in index.iter() {
+        let path = String::from_utf8_lossy(&entry.path).to_string();
+        let mut cur = String::new();
+        for seg in path.split('/') {
+            if !cur.is_empty() {
+                cur.push('/');
+            }
+            cur.push_str(seg);
+            set.insert(cur.clone());
+        }
+    }
+    Ok(set)
+}
+
+/// 自工作区根深度优先收集未跟踪文件（提交预览降级枚举，标准库遍历天然支持
+/// 长路径，访问统一走 verbatim 路径）：
+/// - 目录含 .git = 嵌套仓库 → 未跟踪的按 git 语义折叠为单条目，已跟踪的
+///   子模块由 status 覆盖，均不深入；
+/// - 被忽略的目录整棵剪枝（git 语义：被排除目录内的内容无法被重新包含）；
+/// - 超长路径文件跳过并计数（UI 提示可启用长路径支持）。
+fn walk_untracked(
+    workdir: &Path,
+    repo: &Repository,
+    dir_rel: &str,
+    tracked: &HashSet<String>,
+    files: &mut Vec<ChangeFileInfo>,
+    long_count: &mut u32,
+    long_samples: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth > 128 {
+        return; // 防御异常深的路径 / 链接环
+    }
+    let Ok(rd) = std::fs::read_dir(to_verbatim(&workdir.join(dir_rel))) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue; // 非 UTF-8 文件名 libgit2 同样列不出
+        };
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let rel = if dir_rel.is_empty() {
+            name
+        } else {
+            format!("{dir_rel}/{name}")
+        };
+        if ft.is_dir() {
+            // entry.file_type() 不跟随符号链接：指向目录的链接按单文件条目处理
+            let nested =
+                std::fs::symlink_metadata(to_verbatim(&workdir.join(&rel).join(".git"))).is_ok();
+            if nested {
+                if !tracked.contains(&rel) {
+                    push_untracked_file(workdir, repo, &rel, files, long_count, long_samples);
+                }
+            } else if !repo.is_path_ignored(&rel).unwrap_or(false) {
+                walk_untracked(
+                    workdir,
+                    repo,
+                    &rel,
+                    tracked,
+                    files,
+                    long_count,
+                    long_samples,
+                    depth + 1,
+                );
+            }
+        } else if !tracked.contains(&rel) {
+            push_untracked_file(workdir, repo, &rel, files, long_count, long_samples);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3784,5 +4050,73 @@ mod tests {
         );
         let levels: Vec<&str> = ev.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(levels, ["dim", "warn", "dim", "warn", "error", "dim", "ok"]);
+    }
+
+    // 长路径降级枚举仅在 Windows 触发（libgit2 只在 Windows 校验 MAX_PATH）
+    #[cfg(windows)]
+    mod long_path_fallback {
+        use super::*;
+        use crate::engine::GitEngine;
+
+        fn temp_repo(tag: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("higit-lpf-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(to_verbatim(&dir));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        #[test]
+        fn preview_falls_back_then_full_after_enabling() {
+            let dir = temp_repo("fallback");
+            let backend = Git2Backend::new();
+            let session = backend.init(&dir).unwrap();
+
+            // 已跟踪修改：降级路径仍须列出（status 的非目录条目）
+            std::fs::write(dir.join("tracked.txt"), "v1\n").unwrap();
+            backend.stage(&session, &[dir.join("tracked.txt")]).unwrap();
+            backend.commit(&session, "init", None).unwrap();
+            std::fs::write(dir.join("tracked.txt"), "v2\n").unwrap();
+
+            // 未跟踪区：普通文件 + 被忽略文件 + 被忽略目录 + 嵌套仓库 + 超长文件
+            std::fs::write(dir.join(".gitignore"), "*.log\nnode_modules/\n").unwrap();
+            std::fs::create_dir_all(dir.join("ud/inner")).unwrap();
+            std::fs::create_dir_all(dir.join("ud/node_modules")).unwrap();
+            std::fs::create_dir_all(dir.join("ud/nested/.git")).unwrap();
+            std::fs::write(dir.join("ud/ok.txt"), "x\n").unwrap();
+            std::fs::write(dir.join("ud/skip.log"), "x\n").unwrap();
+            std::fs::write(dir.join("ud/node_modules/junk.txt"), "x\n").unwrap();
+            std::fs::write(dir.join("ud/inner/deep.txt"), "x\n").unwrap();
+            std::fs::write(dir.join("ud/nested/inner.txt"), "x\n").unwrap();
+            let base = dir.to_string_lossy().chars().count() + 1 + "ud/".chars().count();
+            let name = format!("{}.bin", "L".repeat(260 - base + 20));
+            let long_rel = format!("ud/{name}");
+            assert!(full_path_chars(&dir, &long_rel) > 260);
+            std::fs::write(to_verbatim(&dir.join(&long_rel)), "x\n").unwrap();
+
+            // 超长文件让 libgit2 递归枚举整体失败 → 自动降级
+            let preview = backend.commit_preview(&session, "").unwrap();
+            let has = |p: &str| preview.files.iter().any(|f| f.path == p);
+            assert!(has("tracked.txt"), "已跟踪修改必须列出");
+            assert!(has("ud/ok.txt"));
+            assert!(has("ud/inner/deep.txt"));
+            assert!(has("ud/nested"), "嵌套仓库折叠为单条目");
+            assert!(!has("ud/nested/inner.txt"));
+            assert!(!preview.files.iter().any(|f| f.path.ends_with(".log")));
+            assert!(!preview
+                .files
+                .iter()
+                .any(|f| f.path.contains("node_modules")));
+            assert_eq!(preview.long_path_count, 1);
+            assert_eq!(preview.long_path_samples, vec![long_rel.clone()]);
+
+            // 用户显式启用长路径支持 → 重开会话 → 完整递归枚举，超长文件入列
+            backend.enable_core_longpaths(&session).unwrap();
+            let session2 = backend.open(&dir).unwrap();
+            let full = backend.commit_preview(&session2, "").unwrap();
+            assert_eq!(full.long_path_count, 0);
+            assert!(full.files.iter().any(|f| f.path == long_rel));
+
+            let _ = std::fs::remove_dir_all(to_verbatim(&dir));
+        }
     }
 }

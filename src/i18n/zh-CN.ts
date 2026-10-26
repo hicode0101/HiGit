@@ -307,6 +307,14 @@ export const zhCN: Record<string, string> = {
   "Lines Removed": "删除行",
   "Commit & Push": "提交并推送",
   "Commit, then open the push dialog": "提交后打开推送对话框",
+  "Files over the Windows 260-character path limit are hidden from the list":
+    "有 {n} 个文件路径超过 Windows 260 字符上限，已从列表隐藏",
+  "Enable long path support": "启用长路径支持",
+  "Write core.longpaths=true to the repository config, then reload":
+    "向仓库配置写入 core.longpaths=true 并重新加载列表",
+  "Enabling…": "启用中…",
+  "Long path support enabled": "已启用长路径支持（core.longpaths）",
+  "Loading changed files…": "正在读取变更文件…",
   Integration: "整合方式",
   Rebase: "变基",
   Prune: "清理（--prune）",
