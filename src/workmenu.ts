@@ -78,7 +78,8 @@ export function rowMenu(row: FileRowDto, openDiff: (row: FileRowDto) => void): C
     { label: t("Pull"), icon: "arrow-down", action: () => void openSyncDialog("pull") },
     { label: t("Push"), icon: "arrow-up", action: () => void openSyncDialog("push") },
     { separator: true },
-    { label: t("Commit"), icon: "commit", action: () => openCommitDialog() },
+    // 行右键提交 = 只提交该文件 / 该目录下可提交项（对话框范围限定到选中项）
+    { label: t("Commit"), icon: "commit", action: () => openCommitDialog(row.relPath) },
   ];
   const changeable = row.kind !== "clean" && row.kind !== "ignored";
   if (!row.isDir) {

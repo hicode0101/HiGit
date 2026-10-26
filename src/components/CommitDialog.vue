@@ -49,8 +49,9 @@ const hasHead = computed(() => !!store.status?.head);
 const longPathCount = computed(() => preview.value?.longPathCount ?? 0);
 const longPathTip = computed(() => preview.value?.longPathSamples.join("\n") ?? "");
 
-/** 提交范围 = 变更页面包屑所在目录（根 = 整个仓库） */
-const scopeDir = computed(() => store.currentDir);
+/** 提交范围 = 行右键选中的文件 / 目录（store.ui.commitScope），
+ * 否则为变更页面包屑所在目录（根 = 整个仓库） */
+const scopeDir = computed(() => store.ui.commitScope ?? store.currentDir);
 const scopePrefix = computed(() => (scopeDir.value ? `${scopeDir.value}/` : ""));
 
 /** 列表内展示相对当前目录的路径（悬停 title 显示完整路径） */

@@ -55,6 +55,9 @@ export interface UiState {
   syncDialog: SyncKind | null;
   /** 提交对话框（FR-4 扩展） */
   commitDialog: boolean;
+  /** 提交范围（工作区行右键）：文件 / 目录相对路径，只列该范围内可提交项；
+   * null = 当前浏览目录（工具栏 / 快捷键 / 空白区右键语义） */
+  commitScope: string | null;
   /** 撤销修改对话框（工作区右键）：target = 目录（isFile=false，空白区为当前浏览目录）或文件 */
   discard: { target: string; isFile: boolean } | null;
   /** 清理对话框（工作区右键）：git clean 语义，作用于整个工作区 */
@@ -119,6 +122,7 @@ export const store = reactive({
     repoSettingsId: null,
     syncDialog: null,
     commitDialog: false,
+    commitScope: null,
     discard: null,
     clean: false,
     branchOp: null,

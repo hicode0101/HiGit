@@ -393,12 +393,15 @@ export async function doCommit(
   }
 }
 
-/** 打开提交对话框（提交动作统一入口：工具栏 / 快捷键） */
-export function openCommitDialog() {
+/** 打开提交对话框（提交动作统一入口：工具栏 / 快捷键 / 工作区右键）。
+ * `scope` 传入右键选中的文件 / 目录相对路径：对话框只列该范围内的可提交项；
+ * 不传 = 当前浏览目录（工具栏 / 空白区右键语义） */
+export function openCommitDialog(scope?: string) {
   if (!store.repoOpen) {
     toast(t("No repository open"));
     return;
   }
+  store.ui.commitScope = scope ?? null;
   store.ui.commitDialog = true;
 }
 

@@ -1,6 +1,7 @@
 //! 复现 Tauri 命令 commit_preview 的完整调用链（含长路径降级枚举），打印统计。
-//! 用法：cargo run --release -p higit-git --example repro_commit_preview -- [repo路径] [--dump 清单文件]
-//! --dump 把降级枚举的文件清单排序写出，便于与 `git ls-files --others` 逐文件比对。
+//! 用法：cargo run --release -p higit-git --example repro_commit_preview -- [repo路径] [--rel 范围] [--dump 清单文件]
+//! rel 范围 = 目录或单个文件的相对路径（空 = 整个仓库）；
+//! --dump 把枚举的文件清单排序写出，便于与 `git ls-files --others` 逐文件比对。
 
 use std::time::Instant;
 
@@ -12,6 +13,12 @@ fn main() {
         .next()
         .unwrap_or_else(|| r"D:\AiWork\bytedance-src".into());
     let rest: Vec<String> = args.collect();
+    let rel = rest
+        .iter()
+        .position(|a| a == "--rel")
+        .and_then(|i| rest.get(i + 1))
+        .cloned()
+        .unwrap_or_default();
     let dump = rest
         .iter()
         .position(|a| a == "--dump")
@@ -45,10 +52,10 @@ fn main() {
     }
 
     let t = Instant::now();
-    match backend.commit_preview(&session, "") {
+    match backend.commit_preview(&session, &rel) {
         Ok(preview) => {
             println!(
-                "commit_preview OK: {} files, long_path_count={}, samples={:?} in {:?}",
+                "commit_preview(rel={rel:?}) OK: {} files, long_path_count={}, samples={:?} in {:?}",
                 preview.files.len(),
                 preview.long_path_count,
                 preview.long_path_samples,
