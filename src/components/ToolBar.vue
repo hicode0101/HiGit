@@ -1,8 +1,8 @@
 <script setup lang="ts">
-/** 工具栏（原型图1）：高频操作一键直达 + 主题 / 语言切换 */
+/** 工具栏（原型图1）：高频操作一键直达；主题 / 语言在设置对话框中切换 */
 import { computed } from "vue";
-import { store, persistConfig, toast, applyLanguage } from "../store";
-import { t, currentLocale } from "../i18n";
+import { store } from "../store";
+import { t } from "../i18n";
 import IconGlyph from "./IconGlyph.vue";
 
 const emit = defineEmits<{ action: [name: string] }>();
@@ -27,19 +27,6 @@ const buttons = computed<ToolButton[]>(() => [
   { name: "refresh", label: t("Refresh"), icon: "refresh", tip: t("Rescan repository status"), group: 1, disabled: !store.repoOpen },
   { name: "branches", label: t("Branches"), icon: "branch", tip: t("Manage branches"), group: 1, disabled: !store.repoOpen },
 ]);
-
-function toggleTheme() {
-  const effTheme = document.documentElement.dataset.theme;
-  void persistConfig({ theme: effTheme === "dark" ? "light" : "dark" });
-}
-
-function toggleLang() {
-  const next = currentLocale() === "zh-CN" ? "en" : "zh-CN";
-  void persistConfig({ language: next });
-  // 立即应用新语言：watchConfig 的 watch 是异步触发，直接 toast 会取到旧语言的文案
-  applyLanguage();
-  toast(t("Switch Language"));
-}
 </script>
 
 <template>
@@ -56,14 +43,6 @@ function toggleLang() {
         <span>{{ btn.label }}</span>
       </button>
     </template>
-    <div class="flex-spacer" />
-    <button class="tb-icon" :title="t('Toggle dark / light theme')" @click="toggleTheme">
-      <IconGlyph name="moon" :size="17" />
-    </button>
-    <button class="tb-icon lang" :title="t('Switch UI language')" @click="toggleLang">
-      <IconGlyph name="globe" :size="17" />
-      <span>{{ currentLocale() === "zh-CN" ? "EN" : "中" }}</span>
-    </button>
   </div>
 </template>
 
@@ -110,36 +89,5 @@ function toggleLang() {
   height: 24px;
   background: var(--divider);
   flex: none;
-}
-
-.flex-spacer {
-  flex: 1;
-}
-
-.tb-icon {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  width: 34px;
-  height: 34px;
-  border: none;
-  background: none;
-  color: var(--text-primary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  justify-content: center;
-  font-size: 13px;
-}
-
-.tb-icon:hover {
-  background: var(--bg-hover);
-}
-
-.tb-icon.lang {
-  width: auto;
-  padding: 0 10px;
-  border: 1px solid var(--border-color);
-  background: var(--bg-card);
-  border-radius: var(--radius-sm);
 }
 </style>
